@@ -152,6 +152,8 @@ local State = {
     hidden_items = { Sword = {}, Explosion = {} },
     fake_slots = { Sword = {}, Explosion = {} },
     last_equipped_slot = { Sword = nil, Explosion = nil },
+    hooked_buttons = {},
+    buy_button_conns = {},
 }
 
 local function addConn(conn)
@@ -1067,6 +1069,100 @@ Unlocker.fireEquipChange = function(itemType)
     end
 end
 
+Unlocker.getSelectedItem = function()
+    local shop = State.shop_controller
+    if not shop then return nil, nil end
+    local sel = shop._selectedItem
+    if typeof(sel) ~= "table" then return nil, nil end
+    return sel.name, sel.type
+end
+
+Unlocker.resolveItemFromButton = function(btn)
+    if not State.item_info then return nil, nil end
+    local parent = btn.Parent
+    if not parent then return nil, nil end
+
+    local function checkName(n)
+        if State.item_info.Sword[n] then return n, "Sword" end
+        if State.item_info.Explosion[n] then return n, "Explosion" end
+        return nil, nil
+    end
+
+    local n, t = checkName(parent.Name)
+    if n then return n, t end
+
+    local cur = parent
+    for _ = 1, 3 do
+        if not cur then break end
+        n, t = checkName(cur.Name)
+        if n then return n, t end
+        cur = cur.Parent
+    end
+
+    for _, child in ipairs(parent:GetChildren()) do
+        local ok, isText = pcall(function() return child:IsA("TextLabel") or child:IsA("TextButton") end)
+        if ok and isText then
+            local ok2, text = pcall(function() return child.Text end)
+            if ok2 and typeof(text) == "string" then
+                n, t = checkName(text)
+                if n then return n, t end
+            end
+        end
+    end
+
+    return nil, nil
+end
+
+Unlocker.hookBuyButton = function(btn)
+    if not (btn:IsA("TextButton") or btn:IsA("ImageButton")) then return end
+    if State.hooked_buttons[btn] then return end
+    local ok, name = pcall(function() return btn.Name end)
+    if not ok then return end
+    if name:lower() ~= "buybutton" then return end
+
+    State.hooked_buttons[btn] = true
+    local conn = btn.MouseButton1Click:Connect(function()
+        if not State.unlock_active then return end
+
+        local itemName, itemType = Unlocker.getSelectedItem()
+        if not itemName then
+            itemName, itemType = Unlocker.resolveItemFromButton(btn)
+        end
+        if not itemName or not itemType then return end
+
+        if not Unlocker.isReallyOwned(itemType, itemName) then
+            if itemType == "Sword" then
+                Unlocker.equipSword(itemName)
+            elseif itemType == "Explosion" then
+                Unlocker.equipExplosion(itemName)
+            end
+
+            pcall(function()
+                local textLabel = btn:FindFirstChildWhichIsA("TextLabel", true)
+                if textLabel then textLabel.Text = "Equipped" end
+            end)
+        end
+    end)
+    table.insert(State.buy_button_conns, conn)
+end
+
+Unlocker.hookShopButtons = function()
+    local pg = localPlayer:FindFirstChild("PlayerGui")
+    if not pg then return end
+
+    task.spawn(function()
+        for _, desc in ipairs(pg:GetDescendants()) do
+            pcall(Unlocker.hookBuyButton, desc)
+        end
+    end)
+
+    local conn = pg.DescendantAdded:Connect(function(desc)
+        if not State.unlock_active then return end
+        pcall(Unlocker.hookBuyButton, desc)
+    end)
+    table.insert(State.buy_button_conns, conn)
+end
+
 Unlocker.equipSword = function(name)
     if not State.item_info or not State.item_info.Sword[name] then return end
     local oldName = State.equipped_skins.Sword
@@ -1428,6 +1524,9 @@ Unlocker.enable = function()
             end
             task.wait(0.5)
         end
+
+        -- Hook shop buy buttons for equip
+        Unlocker.hookShopButtons()
     end)
 
     persistConfig()
@@ -1441,6 +1540,11 @@ Unlocker.disable = function()
     State.merged_cache = { Sword = nil, Explosion = nil }
     State.merged_ref = { Sword = nil, Explosion = nil }
     State.shop_spoofed = false
+    for _, conn in ipairs(State.buy_button_conns) do
+        pcall(function() conn:Disconnect() end)
+    end
+    State.buy_button_conns = {}
+    State.hooked_buttons = {}
     if State.shop_controller then
         Unlocker.forceRefreshVirtualItems()
     end
