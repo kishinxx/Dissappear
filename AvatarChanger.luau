@@ -33,6 +33,8 @@ local setupvalue = setupvalue or setupval or debug and debug.setupvalue or nil
 local getupvalue = getupvalue or getupval or debug and debug.getupvalue or nil
 local islclosure = islclosure or isourclosure or is_l_closure or isluaclosure or nil
 local getinfo = getinfo or debug and debug.getinfo or nil
+local setthreadidentity = setthreadidentity or setidentity or setthreadcontext or nil
+local getthreadidentity = getthreadidentity or getidentity or getthreadcontext or nil
 
 ------------------------------------------------------------------------
 -- SERVICES (cloneref where supported to reduce anti-cheat surface)
@@ -1427,7 +1429,12 @@ Unlocker.setupParryIntercept = function()
         if not State.parry_func then return end
 
         if not State.unlock_active or not State.equipped_skins.Sword or State.equipped_skins.Sword == "" then
-            return State.parry_func(...)
+            local savedId = getthreadidentity and getthreadidentity() or nil
+            if setthreadidentity then pcall(setthreadidentity, 2) end
+            local ret = {pcall(State.parry_func, ...)}
+            if savedId and setthreadidentity then pcall(setthreadidentity, savedId) end
+            if ret[1] then return unpack(ret, 2) end
+            return
         end
 
         local args = {...}
@@ -1450,7 +1457,11 @@ Unlocker.setupParryIntercept = function()
             args[3] = swordName
         end
 
-        return State.parry_func(unpack(args, 1, argCount))
+        local savedId = getthreadidentity and getthreadidentity() or nil
+        if setthreadidentity then pcall(setthreadidentity, 2) end
+        local ret = {pcall(State.parry_func, unpack(args, 1, argCount))}
+        if savedId and setthreadidentity then pcall(setthreadidentity, savedId) end
+        if ret[1] then return unpack(ret, 2) end
     end)
 
     warn("[Swords] Parry VFX intercept active — slash: " .. State.slash_name)
@@ -1540,34 +1551,35 @@ Unlocker.cleanupSwordCharConns = function()
 end
 
 -- Called when the game changes CurrentlyEquippedSword (e.g. FireSwordInfo fires)
--- This is the key to keeping VFX/SFX and the custom model persistent
 Unlocker.onSwordAttributeChanged = function()
     if not State.unlock_active then return end
+    if State.sword_busy then return end
     local name = State.equipped_skins.Sword
     if not name or name == "" then return end
     local char = localPlayer.Character
     if not char then return end
 
-    -- If our model is already there, just re-set VFX/SFX
-    if char:FindFirstChild(name) then
-        -- Re-set attributes to our sword
-        pcall(function() char:SetAttribute("CurrentlyEquippedSword", name) end)
-        pcall(function() localPlayer:SetAttribute("CurrentlyEquippedSword", name) end)
-        -- Re-set VFX/SFX
-        local sc = State.swords_controller
-        if sc then
-            pcall(function() sc:SetSword(name) end)
-        end
-        return
-    end
+    -- Check if attribute already matches our sword (we set it ourselves)
+    local currentAttr = localPlayer:GetAttribute("CurrentlyEquippedSword")
+    if currentAttr == name then return end
 
-    -- Our model is gone, re-apply everything
-    task.delay(0.06, function()
-        if localPlayer.Character ~= char then return end
-        if not State.unlock_active then return end
+    -- Game changed the attribute to something else — re-apply
+    State.sword_busy = true
+    pcall(function() char:SetAttribute("CurrentlyEquippedSword", name) end)
+    pcall(function() localPlayer:SetAttribute("CurrentlyEquippedSword", name) end)
+    local sc = State.swords_controller
+    if sc then pcall(function() sc:SetSword(name) end) end
+
+    if not char:FindFirstChild(name) then
+        task.delay(0.06, function()
+            if localPlayer.Character ~= char then return end
+            if not State.unlock_active then return end
+            State.sword_busy = false
+            Unlocker.applySwordModel(char, name, true)
+        end)
+    else
         State.sword_busy = false
-        Unlocker.applySwordModel(char, name, true)
-    end)
+    end
 end
 
 Unlocker.monitorCharacter = function(char)
@@ -2082,30 +2094,22 @@ Unlocker.enable = function()
         end
     end)
 
-    -- Periodic re-apply loop (like Zenthra/Allusive — ensures VFX stays set)
+    -- Periodic attribute guard (only re-applies when game overrides our attribute)
     task.spawn(function()
         while State.unlock_active do
             task.wait(1)
             if not State.unlock_active then break end
+            if State.sword_busy then continue end
             local name = State.equipped_skins.Sword
             if name and name ~= "" then
                 local char = localPlayer.Character
                 if char then
-                    if localPlayer:GetAttribute("CurrentlyEquippedSword") ~= name then
+                    local currentAttr = localPlayer:GetAttribute("CurrentlyEquippedSword")
+                    if currentAttr ~= name then
                         pcall(function() char:SetAttribute("CurrentlyEquippedSword", name) end)
                         pcall(function() localPlayer:SetAttribute("CurrentlyEquippedSword", name) end)
-                    end
-                    local sc = State.swords_controller
-                    if sc then
-                        pcall(function() sc:SetSword(name) end)
-                    end
-                    -- Destroy stray sword models
-                    if State.item_info then
-                        for _, child in ipairs(char:GetChildren()) do
-                            if child:IsA("Model") and State.item_info.Sword[child.Name] and child.Name ~= name then
-                                child:Destroy()
-                            end
-                        end
+                        local sc = State.swords_controller
+                        if sc then pcall(function() sc:SetSword(name) end) end
                     end
                 end
             end
