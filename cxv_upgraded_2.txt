@@ -7896,7 +7896,7 @@ local manualSpamToggle = MainTab:CreateToggle({
     Callback = function(enabled)
         if enabled then
             local lastParryTick = 0
-            local lastAnimTick = 0
+            local lastGrabTick = 0
             local spamStartTime = tick()
 
             Connections.manual_spam = RunService.PreSimulation:Connect(function()
@@ -7908,12 +7908,22 @@ local manualSpamToggle = MainTab:CreateToggle({
                     lastParryTick = tick()
                     if _G.config.animfix then
                         local elapsed = tick() - spamStartTime
-                        if elapsed < 2 then
-                            if lastAnimTick == 0 or tick() - lastAnimTick >= 1 then
-                                lastAnimTick = tick()
-                                playParryFix()
+                        if elapsed < 2 and lastGrabTick ~= 0 and tick() - lastGrabTick < 1 then
+                            local char = LocalPlayer.Character
+                            local hum = char and char:FindFirstChildOfClass("Humanoid")
+                            local atr = hum and hum:FindFirstChildOfClass("Animator")
+                            if atr then
+                                for _, track in ipairs(atr:GetPlayingAnimationTracks()) do
+                                    for _, attr in ipairs({"SuccessParry", "Parry"}) do
+                                        if track:GetAttribute(attr) then
+                                            pcall(function() track:Stop(track:GetAttribute("StopFadeTime")) end)
+                                            break
+                                        end
+                                    end
+                                end
                             end
                         else
+                            lastGrabTick = tick()
                             playParryFix()
                         end
                     end
