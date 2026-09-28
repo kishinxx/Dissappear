@@ -80,6 +80,12 @@ _G.config = {
     ability_triggerbot_ms = nil,
     manual_spam_mode = nil,
     triggerbot_detection = nil,
+    avatar_changer_enabled = nil,
+    avatar_changer_target = nil,
+    spoofer_enabled = nil,
+    spoof_username = nil,
+    spoof_displayname = nil,
+    spoof_avatar_user = nil,
 }
 
 if not isfolder("angeli/configs") then
@@ -6342,6 +6348,581 @@ local function applyCosmetics(character)
     applyHeadless(character)
 end
 
+------------------------------------------------------------------------
+-- AVATAR CHANGER + NAME SPOOFER (ported from AvatarChanger_7)
+------------------------------------------------------------------------
+do
+local InsertService = game:GetService("InsertService")
+local TextChatService = game:GetService("TextChatService")
+
+local _avatarState = {
+    applying = false,
+    applied_id = nil,
+    original_desc = nil,
+    cache = {},
+    original_parts = nil,
+    respawn_token = 0,
+    attempt_id = 0,
+    guard_conn = nil,
+    connections = {},
+}
+
+local _spoofState = {
+    applying = false,
+    tracked = setmetatable({}, { __mode = "k" }),
+    connections = {},
+}
+
+local function _resolveUserId(input)
+    if not input or input == "" then return nil end
+    local num = tonumber(input)
+    if num then return num end
+    local ok, id = pcall(function() return Players:GetUserIdFromNameAsync(input) end)
+    return ok and id or nil
+end
+
+local function _escapePattern(s)
+    return s:gsub("[%^%$%(%)%%%.%[%]%*%+%-%?]", "%%%1")
+end
+
+local function _replaceStr(str, find, rep)
+    return str:gsub(_escapePattern(find), rep)
+end
+
+-- Avatar functions
+local AvatarChanger = {}
+
+AvatarChanger.saveOriginal = function()
+    if _avatarState.original_desc then return end
+    task.spawn(function()
+        for i = 1, 5 do
+            local ok, desc = pcall(Players.GetHumanoidDescriptionFromUserIdAsync, Players, LocalPlayer.UserId)
+            if ok and desc then _avatarState.original_desc = desc; break end
+            task.wait(0.3 * i)
+        end
+    end)
+end
+
+AvatarChanger.getDesc = function(uid)
+    if _avatarState.cache[uid] then return _avatarState.cache[uid] end
+    for i = 1, 5 do
+        local ok, desc = pcall(Players.GetHumanoidDescriptionFromUserIdAsync, Players, uid)
+        if ok and desc then _avatarState.cache[uid] = desc; return desc end
+        if i < 5 then task.wait(0.2 * i) end
+    end
+    return nil
+end
+
+AvatarChanger.findBodyPart = function(char, name)
+    if not name or name == "" then return nil end
+    local p = char:FindFirstChild(name)
+    if p and p:IsA("BasePart") then return p end
+    local map = {
+        ["Left Arm"]={"LeftUpperArm","LeftLowerArm","LeftHand"},
+        ["Right Arm"]={"RightUpperArm","RightLowerArm","RightHand"},
+        ["Left Leg"]={"LeftUpperLeg","LeftLowerLeg","LeftFoot"},
+        ["Right Leg"]={"RightUpperLeg","RightLowerLeg","RightFoot"},
+        ["Torso"]={"UpperTorso","LowerTorso"},
+    }
+    for _, n in ipairs(map[name] or {}) do
+        local x = char:FindFirstChild(n)
+        if x and x:IsA("BasePart") then return x end
+    end
+    return nil
+end
+
+AvatarChanger.stripJoints = function(acc)
+    for _, d in ipairs(acc:GetDescendants()) do
+        if d:IsA("Weld") or d:IsA("Motor6D") or d:IsA("WeldConstraint") then d:Destroy() end
+    end
+end
+
+AvatarChanger.attachAccessory = function(parent, hum, acc)
+    if not parent or not acc then return false end
+    local clone = acc:Clone()
+    AvatarChanger.stripJoints(clone)
+    local handle = clone:FindFirstChild("Handle")
+    if not handle or not handle:IsA("BasePart") then clone:Destroy(); return false end
+    handle.Anchored = false; handle.CanCollide = false; handle.Massless = true
+    local origH = acc:FindFirstChild("Handle")
+    local origW = origH and origH:FindFirstChild("AccessoryWeld")
+    local c0, c1, target = CFrame.new(), CFrame.new(), nil
+    if origW and origW:IsA("Weld") and origW.Part1 then
+        target = AvatarChanger.findBodyPart(parent, origW.Part1.Name)
+        c0, c1 = origW.C0, origW.C1
+    end
+    if not target then
+        local att = handle:FindFirstChildOfClass("Attachment")
+        if att then
+            for _, d in ipairs(parent:GetDescendants()) do
+                if d:IsA("Attachment") and d.Name == att.Name and not d:IsDescendantOf(clone) then
+                    target = d.Parent; c0 = att.CFrame; c1 = d.CFrame; break
+                end
+            end
+        end
+    end
+    if not target then
+        local at = clone.AccessoryType
+        if at == Enum.AccessoryType.Hair or at == Enum.AccessoryType.Hat or at == Enum.AccessoryType.Face then
+            target = parent:FindFirstChild("Head")
+        end
+        target = target or parent:FindFirstChild("Head") or parent:FindFirstChild("UpperTorso") or parent:FindFirstChild("Torso")
+    end
+    if target and target:IsA("BasePart") then
+        local w = Instance.new("Weld"); w.Name = "AccessoryWeld"
+        w.Part0 = handle; w.Part1 = target; w.C0 = c0; w.C1 = c1; w.Parent = handle
+        clone.Parent = parent; return true
+    end
+    if hum then if pcall(function() hum:AddAccessory(clone) end) and clone.Parent == parent then return true end end
+    clone:Destroy(); return false
+end
+
+AvatarChanger.removeAccessories = function(char)
+    for _, c in ipairs(char:GetChildren()) do
+        if c:IsA("Accessory") or c:IsA("Hat") then c:Destroy() end
+    end
+end
+
+AvatarChanger.collectAccessories = function(model, desc)
+    local accs, seen = {}, {}
+    local function add(a) if not a or seen[a] then return end; seen[a]=true; table.insert(accs, a) end
+    if model then
+        for _, c in ipairs(model:GetChildren()) do if c:IsA("Accessory") or c:IsA("Hat") then add(c) end end
+        if #accs == 0 then
+            local h = model:FindFirstChildOfClass("Humanoid")
+            if h then pcall(function() for _, a in ipairs(h:GetAccessories()) do add(a) end end) end
+        end
+    end
+    if desc and #accs == 0 then
+        for _, prop in ipairs({"HatAccessory","HairAccessory","FaceAccessory","NeckAccessory","ShouldersAccessory","FrontAccessory","BackAccessory","WaistAccessory"}) do
+            local v = desc[prop]
+            if v and v ~= "" then
+                for m in tostring(v):gmatch("%d+") do
+                    local id = tonumber(m)
+                    if id and id > 0 then
+                        pcall(function()
+                            for _, obj in ipairs(InsertService:GetObjects("rbxassetid://"..id)) do
+                                local ia = obj:IsA("Accessory") and obj or obj:FindFirstChildOfClass("Accessory")
+                                if not ia then for _, d in ipairs(obj:GetDescendants()) do if d:IsA("Accessory") then ia=d; break end end end
+                                if ia then add(ia) end
+                            end
+                        end)
+                    end
+                end
+            end
+        end
+    end
+    return accs
+end
+
+AvatarChanger.transferAccFromTemp = function(parent, acc)
+    if not parent or not acc then return false end
+    local h = acc:FindFirstChild("Handle")
+    if not h or not h:IsA("BasePart") then return false end
+    h.Anchored = false; h.CanCollide = false; h.Massless = true
+    local w = h:FindFirstChild("AccessoryWeld")
+    if not w then for _, c in ipairs(h:GetChildren()) do if c:IsA("Weld") or c:IsA("WeldConstraint") then w=c; break end end end
+    if w and w.Part1 then
+        local t = AvatarChanger.findBodyPart(parent, w.Part1.Name)
+        if t then w.Part1 = t; acc.Parent = parent; return true end
+    end
+    return AvatarChanger.attachAccessory(parent, nil, acc)
+end
+
+AvatarChanger.applyAccessories = function(char, hum, temp, desc)
+    AvatarChanger.removeAccessories(char)
+    local n = 0
+    if temp then
+        for _, c in ipairs(temp:GetChildren()) do
+            if (c:IsA("Accessory") or c:IsA("Hat")) and AvatarChanger.transferAccFromTemp(char, c) then n += 1 end
+        end
+        if n == 0 then
+            local h = temp:FindFirstChildOfClass("Humanoid")
+            if h then pcall(function() for _, a in ipairs(h:GetAccessories()) do if AvatarChanger.transferAccFromTemp(char, a) then n+=1 end end end) end
+        end
+    end
+    if n == 0 then
+        for _, a in ipairs(AvatarChanger.collectAccessories(nil, desc)) do
+            if AvatarChanger.attachAccessory(char, hum, a) then n += 1 end
+        end
+    end
+    return n
+end
+
+AvatarChanger.applyBodyScales = function(hum, desc)
+    if not hum or not desc then return end
+    for _, info in ipairs({
+        {"BodyHeightScale",desc.HeightScale,false}, {"BodyWidthScale",desc.WidthScale,false},
+        {"BodyDepthScale",desc.DepthScale,false}, {"HeadScale",desc.HeadScale,false},
+        {"BodyTypeScale",desc.BodyTypeScale,true}, {"ProportionScale",desc.ProportionScale,true},
+    }) do
+        local name, val, allowZero = info[1], info[2], info[3]
+        if typeof(val)=="number" and (val>0 or (allowZero and val>=0)) then
+            local e = hum:FindFirstChild(name)
+            if not e and hum.RigType == Enum.HumanoidRigType.R15 then
+                e = Instance.new("NumberValue"); e.Name = name; e.Parent = hum
+            end
+            if e and e:IsA("NumberValue") then e.Value = val end
+        end
+    end
+end
+
+AvatarChanger.transferBodyMeshes = function(temp, char, hum)
+    if not temp or not char then return end
+    local th = temp:FindFirstChildOfClass("Humanoid")
+    if th and th.RigType ~= Enum.HumanoidRigType.R15 then
+        for _, c in ipairs(temp:GetChildren()) do
+            if c:IsA("CharacterMesh") then
+                pcall(function()
+                    for _, c2 in ipairs(char:GetChildren()) do if c2:IsA("CharacterMesh") and c2.BodyPart==c.BodyPart then c2:Destroy() end end
+                    c:Clone().Parent = char
+                end)
+            end
+        end
+        return
+    end
+    for _, pn in ipairs({"Head","UpperTorso","LowerTorso","LeftUpperArm","LeftLowerArm","LeftHand","RightUpperArm","RightLowerArm","RightHand","LeftUpperLeg","LeftLowerLeg","LeftFoot","RightUpperLeg","RightLowerLeg","RightFoot"}) do
+        local src, dst = temp:FindFirstChild(pn), char:FindFirstChild(pn)
+        if src and dst and src:IsA("BasePart") and dst:IsA("BasePart") then
+            if src:IsA("MeshPart") and dst:IsA("MeshPart") then
+                local ok = false; pcall(function() dst:ApplyMesh(src); ok=true end)
+                if not ok then pcall(function() dst.MeshId = src.MeshId end) end
+                pcall(function() dst.TextureID = src.TextureID end)
+                pcall(function()
+                    local sa = dst:FindFirstChildOfClass("SurfaceAppearance"); if sa then sa:Destroy() end
+                    local sa2 = src:FindFirstChildOfClass("SurfaceAppearance"); if sa2 then sa2:Clone().Parent = dst end
+                end)
+            end
+            dst = char:FindFirstChild(pn)
+            if dst and dst:IsA("BasePart") then
+                pcall(function() dst.Size = src.Size end)
+                pcall(function()
+                    for _, c in ipairs(src:GetChildren()) do
+                        if c:IsA("Attachment") then local e = dst:FindFirstChild(c.Name); if e and e:IsA("Attachment") then e.CFrame = c.CFrame end end
+                    end
+                end)
+            end
+        end
+    end
+    pcall(function()
+        for _, d in ipairs(temp:GetDescendants()) do
+            if d:IsA("Motor6D") and d.Parent then
+                local t = char:FindFirstChild(d.Parent.Name); t = t and t:FindFirstChild(d.Name)
+                if t and t:IsA("Motor6D") then t.C0 = d.C0; t.C1 = d.C1 end
+            end
+        end
+    end)
+    if hum and th then pcall(function() hum.HipHeight = th.HipHeight end) end
+end
+
+AvatarChanger.createTemp = function(desc, rigType)
+    rigType = rigType or Enum.HumanoidRigType.R15
+    local function try(rt)
+        local ok, m = pcall(Players.CreateHumanoidModelFromDescriptionAsync, Players, desc, rt, Enum.AssetTypeVerification.Always)
+        if not ok or not m then ok, m = pcall(Players.CreateHumanoidModelFromDescriptionAsync, Players, desc, rt) end
+        if not ok or not m then return nil end
+        m.Name = "_AvatarPreview"; m.Parent = ReplicatedStorage
+        pcall(function() RunService.Heartbeat:Wait() end)
+        return m
+    end
+    for i = 1, 3 do local m = try(rigType); if m then return m end; task.wait(0.35*i) end
+    return try(rigType == Enum.HumanoidRigType.R15 and Enum.HumanoidRigType.R6 or Enum.HumanoidRigType.R15)
+end
+
+AvatarChanger.clean = function(char)
+    local tools = {}
+    for _, c in ipairs(char:GetChildren()) do if c:IsA("Tool") or c:IsA("HopperBin") then table.insert(tools, c); c.Parent = nil end end
+    local bp = char.Parent and char.Parent:FindFirstChild("Backpack")
+    if bp then for _, c in ipairs(bp:GetChildren()) do if c:IsA("Tool") or c:IsA("HopperBin") then table.insert(tools, c) end end end
+    local scripts = {}
+    for _, d in ipairs(char:GetDescendants()) do if d:IsA("BaseScript") then scripts[d]=true; if d.Parent then scripts[d.Parent]=true end end end
+    for _, c in ipairs(char:GetChildren()) do
+        if not scripts[c] and (c:IsA("Accessory") or c:IsA("Hat") or c:IsA("BodyColors") or c:IsA("CharacterMesh") or c:IsA("Shirt") or c:IsA("Pants") or c:IsA("ShirtGraphic")) then
+            c:Destroy()
+        end
+    end
+    for _, t in ipairs(tools) do if t and t.Parent == nil then t.Parent = bp or char end end
+end
+
+AvatarChanger.transferAppearance = function(temp, char, hum, desc)
+    if not temp or not char or not hum then return false end
+    pcall(function() if hum.ApplyDescriptionClientServer then hum:ApplyDescriptionClientServer(desc) else hum:ApplyDescription(desc) end end)
+    AvatarChanger.applyBodyScales(hum, desc)
+    pcall(function() RunService.Heartbeat:Wait() end)
+    AvatarChanger.transferBodyMeshes(temp, char, hum)
+    for _, cn in ipairs({"Shirt","Pants","ShirtGraphic"}) do
+        local s = temp:FindFirstChildOfClass(cn); if s then local d = char:FindFirstChildOfClass(cn); if d then d:Destroy() end; s:Clone().Parent = char end
+    end
+    local sc = temp:FindFirstChildOfClass("BodyColors"); local dc = char:FindFirstChildOfClass("BodyColors")
+    if not dc then dc = Instance.new("BodyColors"); dc.Parent = char end
+    if sc then dc.HeadColor3=sc.HeadColor3; dc.TorsoColor3=sc.TorsoColor3; dc.LeftArmColor3=sc.LeftArmColor3; dc.RightArmColor3=sc.RightArmColor3; dc.LeftLegColor3=sc.LeftLegColor3; dc.RightLegColor3=sc.RightLegColor3 end
+    if desc then dc.HeadColor3=desc.HeadColor; dc.TorsoColor3=desc.TorsoColor; dc.LeftArmColor3=desc.LeftArmColor; dc.RightArmColor3=desc.RightArmColor; dc.LeftLegColor3=desc.LeftLegColor; dc.RightLegColor3=desc.RightLegColor end
+    local sh, dh = temp:FindFirstChild("Head"), char:FindFirstChild("Head")
+    if sh and dh then
+        local f = sh:FindFirstChild("face") or sh:FindFirstChildOfClass("Decal")
+        if f then local f2 = dh:FindFirstChild("face") or dh:FindFirstChildOfClass("Decal"); if f2 then f2:Destroy() end; local cl = f:Clone(); cl.Name="face"; cl.Parent=dh end
+    end
+    AvatarChanger.applyAccessories(char, hum, temp, desc)
+    return true
+end
+
+AvatarChanger.revert = function(char)
+    if not char then return end
+    pcall(restoreHeadless, char); pcall(restoreKorblox, char)
+end
+
+AvatarChanger.stopAccessoryGuard = function()
+    if _avatarState.guard_conn then
+        pcall(function() _avatarState.guard_conn:Disconnect() end)
+        _avatarState.guard_conn = nil
+    end
+end
+
+AvatarChanger.startAccessoryGuard = function(char, allowedAccessories)
+    AvatarChanger.stopAccessoryGuard()
+    local allowed = {}
+    for _, acc in ipairs(allowedAccessories) do allowed[acc] = true end
+    _avatarState.guard_conn = char.ChildAdded:Connect(function(child)
+        if not _G.config.avatar_changer_enabled then return end
+        if (child:IsA("Accessory") or child:IsA("Hat")) and not allowed[child] then
+            task.defer(function()
+                if child.Parent == char and not allowed[child] then child:Destroy() end
+            end)
+        end
+    end)
+end
+
+AvatarChanger.applyDesc = function(desc, uid, isRevert)
+    if _avatarState.applying then return end
+    _avatarState.applying = true
+    task.spawn(function()
+        pcall(function()
+            local char = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+            if not isRevert and not _G.config.avatar_changer_enabled then _avatarState.applying = false; return end
+            if not char then _avatarState.applying = false; return end
+            local hum = char:FindFirstChildOfClass("Humanoid") or char:WaitForChild("Humanoid", 5)
+            if not hum then _avatarState.applying = false; return end
+            if not isRevert then AvatarChanger.revert(char); AvatarChanger.stopAccessoryGuard() end
+            AvatarChanger.clean(char)
+            if not isRevert and not _G.config.avatar_changer_enabled then _avatarState.applying = false; return end
+            local temp = AvatarChanger.createTemp(desc, hum.RigType)
+            local ok = false
+            if temp then ok = AvatarChanger.transferAppearance(temp, char, hum, desc); temp:Destroy() end
+            if not ok then
+                pcall(function() if hum.ApplyDescriptionClientServer then hum:ApplyDescriptionClientServer(desc) else hum:ApplyDescription(desc) end end)
+                AvatarChanger.applyBodyScales(hum, desc)
+                AvatarChanger.applyAccessories(char, hum, nil, desc)
+            end
+            if not isRevert then
+                local applied = {}
+                for _, c in ipairs(char:GetChildren()) do
+                    if c:IsA("Accessory") or c:IsA("Hat") then applied[c] = true end
+                end
+                AvatarChanger.startAccessoryGuard(char, applied)
+            end
+        end)
+        _avatarState.applying = false
+    end)
+end
+
+AvatarChanger.apply = function(target)
+    if _avatarState.applying then return end
+    _avatarState.attempt_id += 1; local aid = _avatarState.attempt_id
+    task.spawn(function()
+        if not _G.config.avatar_changer_enabled or (_G.config.avatar_changer_target or "") ~= target or _avatarState.attempt_id ~= aid then return end
+        local uid = _resolveUserId(target); if not uid then return end
+        if _avatarState.applied_id == uid then return end
+        local desc = AvatarChanger.getDesc(uid); if not desc then return end
+        if not _G.config.avatar_changer_enabled or (_G.config.avatar_changer_target or "") ~= target or _avatarState.attempt_id ~= aid then return end
+        _avatarState.applied_id = uid
+        AvatarChanger.applyDesc(desc, uid)
+    end)
+end
+
+AvatarChanger.restore = function()
+    if not _avatarState.original_desc then return end
+    _avatarState.applied_id = nil; _avatarState.applying = false
+    AvatarChanger.stopAccessoryGuard()
+    local char = LocalPlayer.Character
+    if char then AvatarChanger.revert(char) end
+    AvatarChanger.applyDesc(_avatarState.original_desc, LocalPlayer.UserId, true)
+end
+
+AvatarChanger.reapplyOnSpawn = function(char)
+    if not char then return end
+    _avatarState.respawn_token += 1; local tk = _avatarState.respawn_token
+    task.spawn(function()
+        char:WaitForChild("Humanoid", 10); char:WaitForChild("HumanoidRootPart", 10)
+        local loaded = false; pcall(function() loaded = LocalPlayer:HasAppearanceLoaded() end)
+        if not loaded then
+            local done = false
+            local cn = LocalPlayer.CharacterAppearanceLoaded:Connect(function() done=true end)
+            local t=0; while not done and t<6 do task.wait(0.1); t+=0.1; pcall(function() if LocalPlayer:HasAppearanceLoaded() then done=true end end) end
+            if cn then cn:Disconnect() end
+        end
+        if _avatarState.respawn_token ~= tk then return end
+        if _G.config.avatar_changer_enabled and (_G.config.avatar_changer_target or "") ~= "" then
+            _avatarState.applying = false; _avatarState.applied_id = nil
+            AvatarChanger.apply(_G.config.avatar_changer_target)
+        end
+    end)
+end
+
+-- Name Spoofer
+local NameSpoofer = {}
+
+NameSpoofer.applySpoof = function(text)
+    if typeof(text) ~= "string" or text == "" then return text, false end
+    local t = text; local changed = false
+    if (_G.config.spoof_displayname or "") ~= "" and string.find(t, LocalPlayer.DisplayName, 1, true) then
+        changed = true; t = _replaceStr(t, LocalPlayer.DisplayName, _G.config.spoof_displayname)
+    end
+    if (_G.config.spoof_username or "") ~= "" and string.find(t, LocalPlayer.Name, 1, true) then
+        changed = true; t = _replaceStr(t, LocalPlayer.Name, _G.config.spoof_username)
+    end
+    return t, changed
+end
+
+NameSpoofer.hookText = function(label)
+    if not label:IsA("TextLabel") and not label:IsA("TextButton") then return end
+    if _spoofState.tracked[label] then return end
+    _spoofState.tracked[label] = { original = label.Text, type = "text" }
+    local function upd()
+        if _spoofState.applying then return end
+        local t = label.Text; if typeof(t) ~= "string" then return end
+        _spoofState.tracked[label].original = t
+        if not _G.config.spoofer_enabled or t == "" then return end
+        local spoofed, changed = NameSpoofer.applySpoof(t)
+        if changed then
+            _spoofState.applying = true
+            label.Text = spoofed
+            _spoofState.applying = false
+        end
+    end
+    upd()
+    table.insert(_spoofState.connections, label:GetPropertyChangedSignal("Text"):Connect(upd))
+end
+
+NameSpoofer.hookImage = function(label)
+    if not label:IsA("ImageLabel") and not label:IsA("ImageButton") then return end
+    if _spoofState.tracked[label] then return end
+    _spoofState.tracked[label] = { original = label.Image, type = "image" }
+    local function upd()
+        if _spoofState.applying then return end
+        local img = label.Image; if typeof(img) ~= "string" or img == "" then return end
+        _spoofState.tracked[label].original = img
+        if not _G.config.spoofer_enabled then return end
+        local myId = tostring(LocalPlayer.UserId)
+        if string.find(img, myId, 1, true) then
+            local sid = _resolveUserId(_G.config.spoof_avatar_user or "")
+            if not sid then sid = LocalPlayer.UserId end
+            if sid ~= LocalPlayer.UserId then
+                _spoofState.applying = true
+                label.Image = string.gsub(img, myId, tostring(sid))
+                _spoofState.applying = false
+            end
+        end
+    end
+    upd()
+    table.insert(_spoofState.connections, label:GetPropertyChangedSignal("Image"):Connect(upd))
+end
+
+NameSpoofer.hookInst = function(inst)
+    if inst:IsA("TextLabel") or inst:IsA("TextButton") then NameSpoofer.hookText(inst)
+    elseif inst:IsA("ImageLabel") or inst:IsA("ImageButton") then NameSpoofer.hookImage(inst) end
+end
+
+NameSpoofer.hookContainer = function(container)
+    for _, d in ipairs(container:GetDescendants()) do pcall(NameSpoofer.hookInst, d) end
+    table.insert(_spoofState.connections, container.DescendantAdded:Connect(function(d) pcall(NameSpoofer.hookInst, d) end))
+end
+
+NameSpoofer.hookChat = function()
+    if not TextChatService then return end
+    pcall(function()
+        TextChatService.OnIncomingMessage = function(msg)
+            local props = Instance.new("TextChatMessageProperties")
+            if _G.config.spoofer_enabled and msg.TextSource and msg.TextSource.UserId == LocalPlayer.UserId then
+                local p = msg.PrefixText
+                if (_G.config.spoof_displayname or "") ~= "" then p = _replaceStr(p, LocalPlayer.DisplayName, _G.config.spoof_displayname) end
+                if (_G.config.spoof_username or "") ~= "" then p = _replaceStr(p, LocalPlayer.Name, _G.config.spoof_username) end
+                props.PrefixText = p
+            end
+            return props
+        end
+    end)
+end
+
+NameSpoofer.revertAll = function()
+    _spoofState.applying = true
+    for label, info in pairs(_spoofState.tracked) do
+        pcall(function()
+            if info.type == "text" and (label:IsA("TextLabel") or label:IsA("TextButton")) then
+                label.Text = info.original
+            elseif info.type == "image" and (label:IsA("ImageLabel") or label:IsA("ImageButton")) then
+                label.Image = info.original
+            end
+        end)
+    end
+    _spoofState.applying = false
+end
+
+NameSpoofer.reapplyAll = function()
+    _spoofState.applying = true
+    for label, info in pairs(_spoofState.tracked) do
+        pcall(function()
+            if info.type == "text" and (label:IsA("TextLabel") or label:IsA("TextButton")) then
+                local spoofed, changed = NameSpoofer.applySpoof(info.original)
+                label.Text = changed and spoofed or info.original
+            elseif info.type == "image" and (label:IsA("ImageLabel") or label:IsA("ImageButton")) then
+                local img = info.original
+                local myId = tostring(LocalPlayer.UserId)
+                if string.find(img, myId, 1, true) then
+                    local sid = _resolveUserId(_G.config.spoof_avatar_user or "")
+                    if not sid then sid = LocalPlayer.UserId end
+                    if sid ~= LocalPlayer.UserId then
+                        label.Image = string.gsub(img, myId, tostring(sid))
+                    else
+                        label.Image = info.original
+                    end
+                end
+            end
+        end)
+    end
+    _spoofState.applying = false
+end
+
+NameSpoofer.init = function()
+    for _, c in ipairs(_spoofState.connections) do pcall(function() c:Disconnect() end) end
+    _spoofState.connections = {}
+    _spoofState.tracked = setmetatable({}, { __mode = "k" })
+    local playerGui = LocalPlayer:WaitForChild("PlayerGui")
+    NameSpoofer.hookContainer(playerGui)
+    NameSpoofer.hookContainer(workspace)
+    pcall(function() NameSpoofer.hookContainer(game:GetService("CoreGui")) end)
+    NameSpoofer.hookChat()
+end
+
+-- Expose globally so UI callbacks can access them
+_G._AvatarChanger = AvatarChanger
+_G._NameSpoofer = NameSpoofer
+
+-- Auto-reapply avatar on respawn
+LocalPlayer.CharacterAdded:Connect(function(char) AvatarChanger.reapplyOnSpawn(char) end)
+AvatarChanger.saveOriginal()
+
+-- Auto-enable if config was saved on
+task.spawn(function()
+    task.wait(1)
+    if _G.config.avatar_changer_enabled and (_G.config.avatar_changer_target or "") ~= "" then
+        AvatarChanger.apply(_G.config.avatar_changer_target)
+    end
+    if _G.config.spoofer_enabled then
+        NameSpoofer.init()
+    end
+end)
+end -- Avatar Changer + Name Spoofer scope
+
 local function isInRound()
     local char = LocalPlayer.Character
     return char and char.Parent == workspace:FindFirstChild("Alive")
@@ -7565,6 +8146,84 @@ VisualTab:CreateToggle({
             end
             cosmeticsCleanup = {}
         end
+    end,
+})
+
+VisualTab:CreateSection("Avatar Changer")
+
+VisualTab:CreateInput({
+    Name = "Avatar Target",
+    Placeholder = "Username or UserId...",
+    CurrentValue = _G.config.avatar_changer_target or "",
+    Flag = "AvatarChangerTarget",
+    Callback = function(text)
+        _G.config.avatar_changer_target = text
+    end,
+})
+
+VisualTab:CreateToggle({
+    Name = "Avatar Changer",
+    CurrentValue = _G.config.avatar_changer_enabled or false,
+    Flag = "AvatarChangerEnabled",
+    Callback = function(enabled)
+        _G.config.avatar_changer_enabled = enabled
+        if enabled then
+            _G._AvatarChanger.saveOriginal()
+            if (_G.config.avatar_changer_target or "") ~= "" then
+                _G._AvatarChanger.apply(_G.config.avatar_changer_target)
+            end
+        else
+            _G._AvatarChanger.restore()
+        end
+    end,
+})
+
+VisualTab:CreateSection("Name Spoofer")
+
+VisualTab:CreateToggle({
+    Name = "Enable Name Spoofer",
+    CurrentValue = _G.config.spoofer_enabled or false,
+    Flag = "NameSpooferEnabled",
+    Callback = function(enabled)
+        _G.config.spoofer_enabled = enabled
+        if enabled then
+            _G._NameSpoofer.init()
+        else
+            _G._NameSpoofer.revertAll()
+        end
+    end,
+})
+
+VisualTab:CreateInput({
+    Name = "Spoofed Username",
+    Placeholder = "Spoofed Username",
+    CurrentValue = _G.config.spoof_username or "",
+    Flag = "SpoofUsername",
+    Callback = function(text)
+        _G.config.spoof_username = text
+        if _G.config.spoofer_enabled then _G._NameSpoofer.reapplyAll() end
+    end,
+})
+
+VisualTab:CreateInput({
+    Name = "Spoofed Display Name",
+    Placeholder = "Spoofed Display Name",
+    CurrentValue = _G.config.spoof_displayname or "",
+    Flag = "SpoofDisplayName",
+    Callback = function(text)
+        _G.config.spoof_displayname = text
+        if _G.config.spoofer_enabled then _G._NameSpoofer.reapplyAll() end
+    end,
+})
+
+VisualTab:CreateInput({
+    Name = "Avatar Thumbnail User",
+    Placeholder = "Avatar Thumbnail User",
+    CurrentValue = _G.config.spoof_avatar_user or "",
+    Flag = "SpoofAvatarUser",
+    Callback = function(text)
+        _G.config.spoof_avatar_user = text
+        if _G.config.spoofer_enabled then _G._NameSpoofer.reapplyAll() end
     end,
 })
 
