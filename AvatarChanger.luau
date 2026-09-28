@@ -155,6 +155,8 @@ local State = {
     last_equipped_slot = { Sword = nil, Explosion = nil },
     hooked_buttons = {},
     buy_button_conns = {},
+    swords_module = nil,
+    replicated_instances = nil,
 
     -- Emotes
     emote_enabled = false,
@@ -185,6 +187,9 @@ local State = {
         Emote1 = true, Emote2 = true, Emote3 = true, Emote4 = true,
         Emote5 = true, Emote6 = true, Emote7 = true,
     },
+    emote_fav_statables = {},
+    inventory_controller = nil,
+    avatar_guard_conn = nil,
 }
 
 local function addConn(conn)
@@ -592,6 +597,30 @@ Avatar.revert = function(char)
     end)
 end
 
+Avatar.stopAccessoryGuard = function()
+    if State.avatar_guard_conn then
+        pcall(function() State.avatar_guard_conn:Disconnect() end)
+        State.avatar_guard_conn = nil
+    end
+end
+
+Avatar.startAccessoryGuard = function(char, allowedAccessories)
+    Avatar.stopAccessoryGuard()
+    local allowed = {}
+    for _, acc in ipairs(allowedAccessories) do allowed[acc] = true end
+    State.avatar_guard_conn = char.ChildAdded:Connect(function(child)
+        if not Config.avatar_enabled then return end
+        if (child:IsA("Accessory") or child:IsA("Hat")) and not allowed[child] then
+            task.defer(function()
+                if child.Parent == char and not allowed[child] then
+                    child:Destroy()
+                end
+            end)
+        end
+    end)
+    addConn(State.avatar_guard_conn)
+end
+
 Avatar.applyDesc = function(desc, uid, isRevert)
     if State.avatar_applying then return end
     State.avatar_applying = true
@@ -602,7 +631,7 @@ Avatar.applyDesc = function(desc, uid, isRevert)
             if not char then State.avatar_applying = false; return end
             local hum = char:FindFirstChildOfClass("Humanoid") or char:WaitForChild("Humanoid", 5)
             if not hum then State.avatar_applying = false; return end
-            if not isRevert then Avatar.revert(char) end
+            if not isRevert then Avatar.revert(char); Avatar.stopAccessoryGuard() end
             Avatar.clean(char)
             if not isRevert and not Config.avatar_enabled then State.avatar_applying = false; return end
             local temp = Avatar.createTemp(desc, hum.RigType)
@@ -614,6 +643,14 @@ Avatar.applyDesc = function(desc, uid, isRevert)
                 local bc = char:FindFirstChildOfClass("BodyColors"); if not bc then bc=Instance.new("BodyColors"); bc.Parent=char end
                 bc.HeadColor3=desc.HeadColor; bc.TorsoColor3=desc.TorsoColor; bc.LeftArmColor3=desc.LeftArmColor; bc.RightArmColor3=desc.RightArmColor; bc.LeftLegColor3=desc.LeftLegColor; bc.RightLegColor3=desc.RightLegColor
                 Avatar.applyAccessories(char, hum, nil, desc)
+            end
+            -- Guard against game re-adding original accessories
+            if not isRevert then
+                local applied = {}
+                for _, c in ipairs(char:GetChildren()) do
+                    if c:IsA("Accessory") or c:IsA("Hat") then applied[c] = true end
+                end
+                Avatar.startAccessoryGuard(char, applied)
             end
         end)
         State.avatar_applying = false
@@ -637,6 +674,7 @@ end
 Avatar.restore = function()
     if not State.avatar_original_desc then return end
     State.avatar_applied_id = nil; State.avatar_applying = false
+    Avatar.stopAccessoryGuard()
     local char = localPlayer.Character
     if char then Avatar.revert(char) end
     Avatar.applyDesc(State.avatar_original_desc, localPlayer.UserId, true)
@@ -1194,6 +1232,87 @@ Unlocker.hookShopButtons = function()
     table.insert(State.buy_button_conns, conn)
 end
 
+Unlocker.findSwordsModule = function()
+    if State.swords_module then return State.swords_module end
+    local ok, mod = pcall(function()
+        return require(ReplicatedStorage:FindFirstChild("Shared"):FindFirstChild("ReplicatedInstances"):FindFirstChild("Swords"))
+    end)
+    if ok and typeof(mod) == "table" then
+        State.swords_module = mod
+    end
+    return State.swords_module
+end
+
+Unlocker.findReplicatedInstances = function()
+    if State.replicated_instances then return State.replicated_instances end
+    local ok, mod = pcall(function()
+        return require(ReplicatedStorage:FindFirstChild("Shared"):FindFirstChild("ReplicatedInstances"))
+    end)
+    if ok and typeof(mod) == "table" then
+        State.replicated_instances = mod
+    end
+    return State.replicated_instances
+end
+
+Unlocker.fetchSwordModel = function(swordName)
+    local ri = Unlocker.findReplicatedInstances()
+    if not ri then return nil end
+    local model
+    pcall(function()
+        if ri.Collections and ri.Collections.Swords and ri.Collections.Swords.Instances then
+            local inst = ri.Collections.Swords.Instances[swordName]
+            if inst then model = inst:Clone() end
+        end
+    end)
+    if model then return model end
+    pcall(function()
+        if typeof(ri.GetInstance) == "function" then
+            model = ri:GetInstance("Swords", swordName)
+        end
+    end)
+    return model
+end
+
+Unlocker.applySwordModel = function(char, swordName)
+    if not char then return end
+    -- First try the game's own EquipSwordTo
+    local swordsMod = Unlocker.findSwordsModule()
+    local equipped = false
+    if swordsMod and typeof(swordsMod.EquipSwordTo) == "function" then
+        local ok = pcall(function() swordsMod:EquipSwordTo(char, swordName) end)
+        if ok and char:FindFirstChild(swordName) then equipped = true end
+    end
+    -- Fallback: manually fetch and parent the model
+    if not equipped then
+        local model = Unlocker.fetchSwordModel(swordName)
+        if model then
+            model.Name = swordName
+            local rightHand = char:FindFirstChild("RightHand") or char:FindFirstChild("Right Arm")
+            if rightHand then
+                model.Parent = char
+                pcall(function()
+                    local grip = rightHand:FindFirstChild("RightGrip") or rightHand:FindFirstChildWhichIsA("Motor6D")
+                    if grip then
+                        grip.Part1 = model.PrimaryPart or model:FindFirstChildWhichIsA("BasePart")
+                    else
+                        local weld = Instance.new("Motor6D")
+                        weld.Name = "RightGrip"
+                        weld.Part0 = rightHand
+                        weld.Part1 = model.PrimaryPart or model:FindFirstChildWhichIsA("BasePart")
+                        weld.Parent = rightHand
+                    end
+                end)
+            else
+                model.Parent = char
+            end
+        end
+    end
+    -- Update sword animations
+    if swordsMod and typeof(swordsMod.SetSword) == "function" then
+        pcall(function() swordsMod:SetSword(swordName) end)
+    end
+end
+
 Unlocker.equipSword = function(name)
     if not State.item_info or not State.item_info.Sword[name] then return end
     local oldName = State.equipped_skins.Sword
@@ -1209,6 +1328,14 @@ Unlocker.equipSword = function(name)
                 child:Destroy()
             end
         end
+        Unlocker.applySwordModel(char, name)
+        -- Retry after a short delay if model didn't appear
+        task.delay(0.25, function()
+            local c = localPlayer.Character
+            if c and not c:FindFirstChild(name) and State.equipped_skins.Sword == name then
+                Unlocker.applySwordModel(c, name)
+            end
+        end)
     end
 
     Unlocker.fireEquipChange("Sword")
@@ -1507,6 +1634,12 @@ Unlocker.enable = function()
         State.equipped_skins.Sword = Config.equipped_sword
         env.equipped_sword = Config.equipped_sword
         env.sword_name = Config.equipped_sword
+        task.delay(1, function()
+            if State.equipped_skins.Sword == Config.equipped_sword then
+                local char = localPlayer.Character
+                if char then Unlocker.applySwordModel(char, Config.equipped_sword) end
+            end
+        end)
     end
     if Config.equipped_explosion and State.item_info and State.item_info.Explosion[Config.equipped_explosion] then
         State.equipped_skins.Explosion = Config.equipped_explosion
@@ -1839,6 +1972,21 @@ Emotes.installHooks = function()
         end
     end
 
+    -- Hook InventoryController.GetFavoriteState for unowned emotes
+    if State.inventory_controller and typeof(State.inventory_controller.GetFavoriteState) == "function" then
+        local prevGetFav = State.inventory_controller.GetFavoriteState
+        State.inventory_controller.GetFavoriteState = function(self, itemType, itemName, ...)
+            local result = prevGetFav(self, itemType, itemName, ...)
+            if State.emote_enabled and itemType == "Emote" and itemName and typeof(result) == "table" then
+                if not Emotes.reallyOwned(itemName) and typeof(result.Get) == "function" and typeof(result.Set) == "function" then
+                    State.emote_fav_statables = State.emote_fav_statables or {}
+                    State.emote_fav_statables[itemName] = result
+                end
+            end
+            return result
+        end
+    end
+
     -- Hook EmoteController.Play to intercept unowned emote plays
     if State.emote_controller and typeof(State.emote_controller.Play) == "function" then
         State.emote_ec_play = State.emote_controller.Play
@@ -1875,6 +2023,17 @@ Emotes.findControllers = function()
             State.emote_controller = mod
         end
     end
+    if not State.inventory_controller then
+        local trading = controllers:FindFirstChild("Trading")
+        local ic = trading and trading:FindFirstChild("InventoryController")
+        if not ic then ic = controllers:FindFirstChild("InventoryController", true) end
+        if ic then
+            local ok, mod = pcall(require, ic)
+            if ok and typeof(mod) == "table" then
+                State.inventory_controller = mod
+            end
+        end
+    end
 end
 
 Emotes.getEmoteWheel = function()
@@ -1889,6 +2048,22 @@ Emotes.repaintWheel = function()
     pcall(function() if ctrl.UpdateHolderEmotes then ctrl:UpdateHolderEmotes() end end)
     pcall(function() if ctrl.updateCenterText then ctrl:updateCenterText() end end)
     pcall(function() if ctrl.UpdateMenuContentEmotes then ctrl:UpdateMenuContentEmotes() end end)
+    pcall(function() if ctrl.populateEmoteList then ctrl:populateEmoteList() end end)
+end
+
+Emotes.refreshEmoteList = function()
+    local ew = Emotes.getEmoteWheel()
+    if not ew then return end
+    local list = ew:FindFirstChild("List")
+    if not list then return end
+    local content = list:FindFirstChild("Content")
+    if not content or not content:IsA("ScrollingFrame") then return end
+    for _, child in ipairs(content:GetChildren()) do
+        if not (child:IsA("UIGridLayout") or child:IsA("UIListLayout") or child:IsA("UIPadding") or child:IsA("UIAspectRatioConstraint") or child:IsA("UIScale") or child:IsA("UICorner") or child:IsA("UIStroke") or child.Name == "TEMPLATE") then
+            pcall(function() child:Destroy() end)
+        end
+    end
+    Emotes.repaintWheel()
 end
 
 Emotes.currentAbsSlot = function()
@@ -1986,6 +2161,7 @@ Emotes.enable = function()
     State.emote_merged = nil
     State.emote_merged_ref = nil
     Emotes.refreshOwned()
+    Emotes.refreshEmoteList()
     Emotes.repaintWheel()
 
     task.spawn(function()
@@ -2395,17 +2571,28 @@ local function createUI()
 
     -- Auto-enable features that were saved as on
     task.spawn(function()
-        task.wait(0.5)
+        local char = localPlayer.Character or localPlayer.CharacterAdded:Wait()
+        if char then
+            local hum = char:FindFirstChildOfClass("Humanoid") or char:WaitForChild("Humanoid", 5)
+            if hum then
+                pcall(function()
+                    if not localPlayer:HasAppearanceLoaded() then
+                        localPlayer.CharacterAppearanceLoaded:Wait()
+                    end
+                end)
+            end
+        end
+        task.wait(0.3)
         if Config.avatar_enabled and Config.avatar_target ~= "" then
             Avatar.saveOriginal()
             Avatar.apply(Config.avatar_target)
         end
         if Config.headless_enabled then
-            local char = localPlayer.Character
+            char = localPlayer.Character
             if char then applyHeadless(char) end
         end
         if Config.korblox_enabled then
-            local char = localPlayer.Character
+            char = localPlayer.Character
             if char then applyKorblox(char) end
         end
         if Config.spoofer_enabled then
