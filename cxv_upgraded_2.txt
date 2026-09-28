@@ -1905,6 +1905,8 @@ function Tab:Keybind(opts)
             if input.KeyCode == Enum.KeyCode.Escape then
                 self_.Listening = false
                 render()
+            elseif input.KeyCode == Enum.KeyCode.Delete or input.KeyCode == Enum.KeyCode.Backspace then
+                self_:Set(nil)
             else
                 self_:Set(input.KeyCode)
             end
