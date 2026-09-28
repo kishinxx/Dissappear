@@ -156,6 +156,7 @@ local State = {
     hooked_buttons = {},
     buy_button_conns = {},
     swords_module = nil,
+    swords_controller = nil,
     replicated_instances = nil,
 
     -- Emotes
@@ -1274,15 +1275,40 @@ Unlocker.fetchSwordModel = function(swordName)
     return model
 end
 
+Unlocker.findSwordsController = function()
+    if State.swords_controller then return State.swords_controller end
+    local controllers = ReplicatedStorage:FindFirstChild("Controllers")
+    if not controllers then return nil end
+    for _, child in ipairs(controllers:GetDescendants()) do
+        if child:IsA("ModuleScript") and child.Name:find("Sword") then
+            local ok, mod = pcall(require, child)
+            if ok and typeof(mod) == "table" and typeof(mod.SetSword) == "function" then
+                State.swords_controller = mod
+                return mod
+            end
+        end
+    end
+    return nil
+end
+
 Unlocker.applySwordModel = function(char, swordName)
     if not char then return end
-    -- First try the game's own EquipSwordTo
+    -- Pre-load model into ReplicatedInstances cache
+    pcall(function()
+        local ri = Unlocker.findReplicatedInstances()
+        if ri and typeof(ri.GetInstance) == "function" then
+            ri:GetInstance("Swords", swordName)
+        end
+    end)
+
+    -- Try the game's own EquipSwordTo (may work now that model is cached)
     local swordsMod = Unlocker.findSwordsModule()
     local equipped = false
     if swordsMod and typeof(swordsMod.EquipSwordTo) == "function" then
-        local ok = pcall(function() swordsMod:EquipSwordTo(char, swordName) end)
-        if ok and char:FindFirstChild(swordName) then equipped = true end
+        pcall(function() swordsMod:EquipSwordTo(char, swordName) end)
+        if char:FindFirstChild(swordName) then equipped = true end
     end
+
     -- Fallback: manually fetch and parent the model
     if not equipped then
         local model = Unlocker.fetchSwordModel(swordName)
@@ -1308,8 +1334,12 @@ Unlocker.applySwordModel = function(char, swordName)
             end
         end
     end
-    -- Update sword animations
-    if swordsMod and typeof(swordsMod.SetSword) == "function" then
+
+    -- Update sword animations via SwordsController or Swords module
+    local sc = Unlocker.findSwordsController()
+    if sc then
+        pcall(function() sc:SetSword(swordName) end)
+    elseif swordsMod and typeof(swordsMod.SetSword) == "function" then
         pcall(function() swordsMod:SetSword(swordName) end)
     end
 end
@@ -1346,10 +1376,13 @@ Unlocker.equipSword = function(name)
         end
         Unlocker.applySwordModel(char, name)
         Unlocker.setSwordAttributes(char, name)
-        -- Retry after a short delay if model didn't appear
-        task.delay(0.25, function()
-            local c = localPlayer.Character
-            if c and not c:FindFirstChild(name) and State.equipped_skins.Sword == name then
+        -- Retry with increasing delays until model appears
+        task.spawn(function()
+            for _, delay in ipairs({0.15, 0.3, 0.5, 1.0}) do
+                task.wait(delay)
+                local c = localPlayer.Character
+                if not c or State.equipped_skins.Sword ~= name then return end
+                if c:FindFirstChild(name) then return end
                 Unlocker.applySwordModel(c, name)
                 Unlocker.setSwordAttributes(c, name)
             end
