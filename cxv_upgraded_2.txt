@@ -7909,7 +7909,7 @@ local manualSpamToggle = MainTab:CreateToggle({
                     if _G.config.animfix then
                         local elapsed = tick() - spamStartTime
                         if elapsed < 2 then
-                            if tick() - lastAnimTick >= 1 then
+                            if lastAnimTick == 0 or tick() - lastAnimTick >= 1 then
                                 lastAnimTick = tick()
                                 playParryFix()
                             end
