@@ -7896,10 +7896,19 @@ local manualSpamToggle = MainTab:CreateToggle({
     Callback = function(enabled)
         if enabled then
             local lastParryTick = 0
+            local spamStartTime = tick()
 
             Connections.manual_spam = RunService.PreSimulation:Connect(function()
                 if not isInRound() then return end
-                local kps = math.clamp(tonumber(_G.config.manual_spam_kps) or 100, 1, 3000)
+                local targetKps = math.clamp(tonumber(_G.config.manual_spam_kps) or 100, 1, 3000)
+                local elapsed = tick() - spamStartTime
+                local rampTime = 1.5
+                local kps
+                if elapsed < rampTime then
+                    kps = 1 + (targetKps - 1) * (elapsed / rampTime)
+                else
+                    kps = targetKps
+                end
                 local delay = 1 / kps
 
                 if tick() - lastParryTick >= delay then
