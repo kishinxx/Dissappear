@@ -104,6 +104,7 @@ local Config = {
     unlock_all_enabled = saved and saved.unlock_all_enabled or false,
     equipped_sword = saved and saved.equipped_sword or nil,
     equipped_explosion = saved and saved.equipped_explosion or nil,
+    emote_enabled = saved and saved.emote_enabled or false,
     toggle_key = Enum.KeyCode.RightShift,
 }
 
@@ -154,6 +155,36 @@ local State = {
     last_equipped_slot = { Sword = nil, Explosion = nil },
     hooked_buttons = {},
     buy_button_conns = {},
+
+    -- Emotes
+    emote_enabled = false,
+    emote_installed = false,
+    emote_storage = {},
+    emote_shared_module = nil,
+    emote_trove_module = nil,
+    emote_trove = nil,
+    emote_current = nil,
+    emote_raw_get = nil,
+    emote_real_owned = nil,
+    emote_merged = nil,
+    emote_merged_ref = nil,
+    emote_static_fakes = nil,
+    emote_virtual = {},
+    emote_favorites = {},
+    emote_wheel_controller = nil,
+    emote_controller = nil,
+    emote_ec_play = nil,
+    emote_connections = {},
+    emote_hooked_holders = nil,
+    emote_loop = nil,
+    emote_move_conn = nil,
+    emote_last_play = nil,
+    emote_last_play_t = 0,
+    emote_boot_id = 0,
+    emote_basic = {
+        Emote1 = true, Emote2 = true, Emote3 = true, Emote4 = true,
+        Emote5 = true, Emote6 = true, Emote7 = true,
+    },
 }
 
 local function addConn(conn)
@@ -1552,6 +1583,470 @@ Unlocker.disable = function()
 end
 
 ------------------------------------------------------------------------
+-- EMOTE UNLOCK
+------------------------------------------------------------------------
+local Emotes = {}
+
+Emotes.loadAnimations = function()
+    local misc = ReplicatedStorage:FindFirstChild("Misc")
+    if not misc then return end
+    local folder = misc:FindFirstChild("Emotes")
+    if not folder then return end
+    for _, child in ipairs(folder:GetChildren()) do
+        if child:IsA("Animation") and child:GetAttribute("EmoteName") then
+            State.emote_storage[child:GetAttribute("EmoteName")] = child
+        end
+    end
+end
+
+Emotes.getSharedModule = function()
+    if State.emote_shared_module ~= nil then
+        return State.emote_shared_module or nil
+    end
+    local shared = ReplicatedStorage:FindFirstChild("Shared")
+    local mod = shared and shared:FindFirstChild("EmotesShared")
+    if not mod then State.emote_shared_module = false; return nil end
+    local ok, result = pcall(require, mod)
+    if ok and typeof(result) == "table" and typeof(result.Play) == "function" then
+        State.emote_shared_module = result
+    else
+        State.emote_shared_module = false
+    end
+    return State.emote_shared_module or nil
+end
+
+Emotes.getTroveModule = function()
+    if State.emote_trove_module ~= nil then
+        return State.emote_trove_module or nil
+    end
+    local packages = ReplicatedStorage:FindFirstChild("Packages")
+    local mod = packages and packages:FindFirstChild("Trove")
+    if not mod then State.emote_trove_module = false; return nil end
+    local ok, result = pcall(require, mod)
+    if ok and typeof(result) == "table" and typeof(result.new) == "function" then
+        State.emote_trove_module = result
+    else
+        State.emote_trove_module = false
+    end
+    return State.emote_trove_module or nil
+end
+
+Emotes.stopTrack = function()
+    if State.emote_trove then
+        pcall(function() State.emote_trove:Destroy() end)
+        State.emote_trove = nil
+    end
+end
+
+Emotes.playInternal = function(emoteName)
+    if typeof(emoteName) ~= "string" or emoteName == "" then return false end
+    local char = localPlayer.Character
+    if not char or not char.PrimaryPart then return false end
+    if not char:FindFirstChildWhichIsA("Humanoid") then return false end
+    local emotesShared = Emotes.getSharedModule()
+    local troveModule = Emotes.getTroveModule()
+    if not emotesShared or not troveModule then return false end
+    Emotes.stopTrack()
+    State.emote_trove = troveModule.new()
+    State.emote_current = emoteName
+    local ok = pcall(function()
+        emotesShared:Play(char, State.emote_trove, emoteName, true, workspace:GetServerTimeNow(), nil)
+    end)
+    if not ok then Emotes.stopTrack(); return false end
+    return true
+end
+
+Emotes.stopEmote = function()
+    Emotes.stopTrack()
+    State.emote_current = nil
+end
+
+Emotes.stopLocal = function()
+    if State.emote_move_conn then
+        pcall(function() State.emote_move_conn:Disconnect() end)
+        State.emote_move_conn = nil
+    end
+    State.emote_last_play = nil
+    Emotes.stopEmote()
+    pcall(function()
+        local char = localPlayer.Character
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        local animator = hum and hum:FindFirstChildOfClass("Animator")
+        if not animator then return end
+        for _, track in ipairs(animator:GetPlayingAnimationTracks()) do
+            local anim = track.Animation
+            if anim then
+                local attr = anim:GetAttribute("EmoteName")
+                if attr or State.emote_storage[anim.Name] or State.emote_storage[attr] then
+                    pcall(function() track:Stop(0) end)
+                end
+            end
+        end
+    end)
+end
+
+Emotes.playLocal = function(emoteName)
+    local now = os.clock()
+    if emoteName == State.emote_last_play and now - State.emote_last_play_t < 0.25 then
+        return
+    end
+    State.emote_last_play = emoteName
+    State.emote_last_play_t = now
+    Emotes.stopLocal()
+    if not Emotes.playInternal(emoteName) then return end
+    local char = localPlayer.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if hum then
+        State.emote_move_conn = hum:GetPropertyChangedSignal("MoveDirection"):Connect(function()
+            if hum.MoveDirection.Magnitude > 0 then
+                Emotes.stopLocal()
+            end
+        end)
+    end
+end
+
+Emotes.reallyOwned = function(name)
+    if not State.emote_real_owned then
+        Emotes.refreshOwned()
+    end
+    return State.emote_real_owned and State.emote_real_owned[name] == true
+end
+
+Emotes.refreshOwned = function()
+    local owned = {}
+    if State.emote_raw_get and State.inventory_shared then
+        local ok, items = pcall(State.emote_raw_get, State.inventory_shared, nil, "Emote")
+        if ok and typeof(items) == "table" then
+            for _, item in pairs(items) do
+                if typeof(item) == "table" and item.Name then
+                    owned[item.Name] = true
+                end
+            end
+        end
+    end
+    State.emote_real_owned = owned
+end
+
+Emotes.getStaticFakes = function()
+    if State.emote_static_fakes then return State.emote_static_fakes end
+    local fakes = {}
+    local shared = State.inventory_shared
+    local catalog = State.item_info and State.item_info.Emote
+    if shared and typeof(catalog) == "table" then
+        for k in pairs(catalog) do
+            local ok, key = pcall(function()
+                return shared:ItemToKey("Emote", { Id = k, Name = k }, {"Id"})
+            end)
+            if ok and key then fakes[key] = { Id = k, Name = k } end
+        end
+    end
+    State.emote_static_fakes = fakes
+    return fakes
+end
+
+Emotes.getMerged = function()
+    local rawItems = State.emote_raw_get and State.emote_raw_get(State.inventory_shared, nil, "Emote") or nil
+    if State.emote_merged and State.emote_merged_ref == rawItems then
+        return State.emote_merged
+    end
+    local real = typeof(rawItems) == "table" and rawItems or {}
+    local deleted = {}
+    local realOwned = {}
+    for _, item in pairs(real) do
+        if typeof(item) == "table" and item.Name then
+            realOwned[item.Name] = true
+        end
+    end
+    State.emote_real_owned = realOwned
+    local merged = {}
+    for k, v in pairs(real) do
+        if not (typeof(v) == "table" and v.Name and deleted[v.Name]) then
+            merged[k] = v
+        end
+    end
+    for k, fake in pairs(Emotes.getStaticFakes()) do
+        if not realOwned[fake.Name] and merged[k] == nil then
+            merged[k] = fake
+        end
+    end
+    State.emote_merged = merged
+    State.emote_merged_ref = rawItems
+    return merged
+end
+
+Emotes.installHooks = function()
+    if State.emote_installed then return true end
+    if not State.inventory_shared or not State.item_info then return false end
+    local shared = State.inventory_shared
+    State.emote_raw_get = State.original_funcs.Get or shared.Get
+
+    local prevGet = shared.Get
+    shared.Get = function(self, player, itemType)
+        if State.emote_enabled and player == nil and itemType == "Emote" then
+            return Emotes.getMerged()
+        end
+        return prevGet(self, player, itemType)
+    end
+
+    local prevGetItem = shared.GetItem
+    shared.GetItem = function(self, player, itemType, itemName)
+        local result = prevGetItem(self, player, itemType, itemName)
+        if result or not State.emote_enabled or player ~= nil or itemType ~= "Emote" then
+            return result
+        end
+        local catalog = State.item_info.Emote
+        if typeof(catalog) ~= "table" then return result end
+        if catalog[itemName] then
+            return { Id = itemName, Name = itemName }
+        end
+        local ok, conv = pcall(function() return self:StringToItem("Emote", itemName) end)
+        if ok and typeof(conv) == "table" and conv.Name and catalog[conv.Name] then
+            if conv.Id == nil then conv.Id = conv.Name end
+            return conv
+        end
+        return result
+    end
+
+    local prevFindItems = shared.FindItemsWithKey
+    if typeof(prevFindItems) == "function" then
+        shared.FindItemsWithKey = function(self, player, itemType, key)
+            local result = prevFindItems(self, player, itemType, key)
+            if not State.emote_enabled or player ~= nil or itemType ~= "Emote" then
+                return result
+            end
+            if typeof(result) == "table" and #result > 0 then return result end
+            local catalog = State.item_info.Emote
+            if catalog and catalog[key] then return { key } end
+            return result
+        end
+    end
+
+    local prevGetEquippedList = shared.GetEquippedList
+    if typeof(prevGetEquippedList) == "function" then
+        shared.GetEquippedList = function(self, player, itemType, ...)
+            local result = prevGetEquippedList(self, player, itemType, ...)
+            if not State.emote_enabled or player ~= nil or itemType ~= "Emote" then
+                return result
+            end
+            local merged = {}
+            if typeof(result) == "table" then
+                for k, v in pairs(result) do merged[k] = v end
+            end
+            for k, name in pairs(State.emote_virtual) do
+                merged[k] = { Name = name, Id = name }
+            end
+            return merged
+        end
+    end
+
+    -- Hook EmoteController.Play to intercept unowned emote plays
+    if State.emote_controller and typeof(State.emote_controller.Play) == "function" then
+        State.emote_ec_play = State.emote_controller.Play
+        State.emote_controller.Play = function(self, emoteName, ...)
+            if State.emote_enabled and typeof(emoteName) == "string" and emoteName ~= "" then
+                if not State.emote_basic[emoteName] and not Emotes.reallyOwned(emoteName) then
+                    Emotes.playLocal(emoteName)
+                    return
+                end
+                Emotes.stopLocal()
+            end
+            return State.emote_ec_play(self, emoteName, ...)
+        end
+    end
+
+    State.emote_installed = true
+    return true
+end
+
+Emotes.findControllers = function()
+    local controllers = ReplicatedStorage:FindFirstChild("Controllers")
+    if not controllers then return end
+    local ewc = controllers:FindFirstChild("EmoteWheelController")
+    if ewc then
+        local ok, mod = pcall(require, ewc)
+        if ok and typeof(mod) == "table" then
+            State.emote_wheel_controller = mod
+        end
+    end
+    local ec = controllers:FindFirstChild("EmoteController")
+    if ec then
+        local ok, mod = pcall(require, ec)
+        if ok and typeof(mod) == "table" then
+            State.emote_controller = mod
+        end
+    end
+end
+
+Emotes.getEmoteWheel = function()
+    local pg = localPlayer:FindFirstChild("PlayerGui")
+    if not pg then return nil end
+    return pg:FindFirstChild("EmoteWheel")
+end
+
+Emotes.repaintWheel = function()
+    local ctrl = State.emote_wheel_controller
+    if not ctrl then return end
+    pcall(function() if ctrl.UpdateHolderEmotes then ctrl:UpdateHolderEmotes() end end)
+    pcall(function() if ctrl.updateCenterText then ctrl:updateCenterText() end end)
+    pcall(function() if ctrl.UpdateMenuContentEmotes then ctrl:UpdateMenuContentEmotes() end end)
+end
+
+Emotes.currentAbsSlot = function()
+    local ctrl = State.emote_wheel_controller
+    local n = ctrl and tonumber(ctrl.selected) or 1
+    if n < 1 then n = 1 end
+    if ctrl and ctrl.type == "Wheel" then
+        local page = ctrl and tonumber(ctrl.page) or 1
+        if page < 1 then page = 1 end
+        return n + (page - 1) * 8
+    end
+    return n
+end
+
+Emotes.bindWheelSlot = function(btn)
+    if not btn then return end
+    local lastClick = 0
+    local function handler()
+        if not State.emote_enabled then return end
+        local now = os.clock()
+        if now - lastClick < 0.15 then return end
+        lastClick = now
+        local ew = Emotes.getEmoteWheel()
+        local list = ew and ew:FindFirstChild("List")
+        if list and list:IsA("GuiObject") and list.Visible then return end
+        local n = tonumber(btn.Name)
+        if not n then return end
+        local ctrl = State.emote_wheel_controller
+        if ctrl and ctrl.type == "Wheel" then
+            local page = tonumber(ctrl.page) or 1
+            if page < 1 then page = 1 end
+            n = n + (page - 1) * 8
+        end
+        local name = State.emote_virtual[n]
+        if typeof(name) ~= "string" or name == "" then return end
+        if State.emote_basic[name] or Emotes.reallyOwned(name) then
+            Emotes.stopLocal()
+            return
+        end
+        Emotes.playLocal(name)
+    end
+    if btn.MouseButton1Click then
+        table.insert(State.emote_connections, btn.MouseButton1Click:Connect(handler))
+    end
+end
+
+Emotes.bindWheelSlots = function()
+    if not State.emote_enabled then return end
+    local ew = Emotes.getEmoteWheel()
+    if not ew then return end
+    if not State.emote_hooked_holders then
+        State.emote_hooked_holders = setmetatable({}, { __mode = "k" })
+    end
+    for _, container in ipairs({ ew:FindFirstChild("Wheel"), ew:FindFirstChild("Menu") }) do
+        if container then
+            local holder = nil
+            for _, desc in ipairs(container:GetDescendants()) do
+                if desc:IsA("GuiObject") and desc:FindFirstChild("1") and desc:FindFirstChild("2") then
+                    holder = desc; break
+                end
+            end
+            if holder and not State.emote_hooked_holders[holder] then
+                local found = false
+                for i = 1, 24 do
+                    local slot = holder:FindFirstChild(tostring(i))
+                    if slot and (slot:IsA("ImageButton") or slot:IsA("GuiButton")) then
+                        Emotes.bindWheelSlot(slot)
+                        found = true
+                    end
+                end
+                if found then State.emote_hooked_holders[holder] = true end
+            end
+        end
+    end
+end
+
+Emotes.enable = function()
+    if not Unlocker.loadModules() then
+        warn("[Emotes] Failed to load game modules")
+        return false
+    end
+    State.emote_boot_id = State.emote_boot_id + 1
+    local bootId = State.emote_boot_id
+    Emotes.loadAnimations()
+    Emotes.findControllers()
+
+    if not State.emote_installed then
+        if not Emotes.installHooks() then
+            warn("[Emotes] Failed to install hooks")
+            return false
+        end
+    end
+    State.emote_enabled = true
+    Config.emote_enabled = true
+    State.emote_merged = nil
+    State.emote_merged_ref = nil
+    Emotes.refreshOwned()
+    Emotes.repaintWheel()
+
+    task.spawn(function()
+        local pg = localPlayer:WaitForChild("PlayerGui", 15)
+        if not pg or State.emote_boot_id ~= bootId then return end
+        local ew = pg:WaitForChild("EmoteWheel", 15)
+        if not ew or not State.emote_enabled or State.emote_boot_id ~= bootId then return end
+        Emotes.bindWheelSlots()
+
+        table.insert(State.emote_connections, ew:GetPropertyChangedSignal("Enabled"):Connect(function()
+            if ew.Enabled and State.emote_enabled then
+                task.defer(function()
+                    if State.emote_enabled then
+                        Emotes.repaintWheel()
+                        Emotes.bindWheelSlots()
+                    end
+                end)
+            end
+        end))
+    end)
+
+    if State.emote_loop then
+        pcall(function() task.cancel(State.emote_loop) end)
+    end
+    State.emote_loop = task.spawn(function()
+        while State.emote_enabled and State.emote_boot_id == bootId do
+            task.wait(2)
+            if not State.emote_enabled or State.emote_boot_id ~= bootId then break end
+            Emotes.bindWheelSlots()
+        end
+    end)
+
+    persistConfig()
+    return true
+end
+
+Emotes.disable = function()
+    State.emote_enabled = false
+    Config.emote_enabled = false
+    if State.emote_loop then
+        pcall(function() task.cancel(State.emote_loop) end)
+        State.emote_loop = nil
+    end
+    Emotes.stopLocal()
+    for _, conn in ipairs(State.emote_connections) do
+        pcall(function()
+            if typeof(conn) == "function" then conn()
+            elseif conn.Disconnect then conn:Disconnect()
+            elseif conn.Destroy then conn:Destroy()
+            end
+        end)
+    end
+    table.clear(State.emote_connections)
+    State.emote_hooked_holders = nil
+    State.emote_merged = nil
+    State.emote_merged_ref = nil
+    task.defer(function() pcall(Emotes.repaintWheel) end)
+    persistConfig()
+end
+
+------------------------------------------------------------------------
 -- UI
 ------------------------------------------------------------------------
 local function createUI()
@@ -1803,6 +2298,33 @@ local function createUI()
     note.TextColor3 = C.dim; note.TextSize = 10; note.Font = Enum.Font.Gotham
     note.TextXAlignment = Enum.TextXAlignment.Left; note.TextWrapped = true; note.LayoutOrder = nextOrd()
 
+    local emoteStatus = Instance.new("TextLabel", scroll)
+    emoteStatus.Size = UDim2.new(1, -4, 0, 20); emoteStatus.BackgroundTransparency = 1
+    emoteStatus.Text = "  Emotes: Off"; emoteStatus.TextColor3 = C.dim
+    emoteStatus.TextSize = 11; emoteStatus.Font = Enum.Font.Gotham
+    emoteStatus.TextXAlignment = Enum.TextXAlignment.Left; emoteStatus.LayoutOrder = nextOrd()
+
+    mkToggle("Unlock All Emotes", Config.emote_enabled or false, function(on)
+        if on then
+            emoteStatus.Text = "  Emotes: Loading..."
+            task.spawn(function()
+                local ok = Emotes.enable()
+                emoteStatus.Text = ok and "  Emotes: Active" or "  Emotes: Failed"
+                emoteStatus.TextColor3 = ok and C.accent2 or C.danger
+            end)
+        else
+            Emotes.disable()
+            emoteStatus.Text = "  Emotes: Off"
+            emoteStatus.TextColor3 = C.dim
+        end
+    end)
+
+    local emoteNote = Instance.new("TextLabel", scroll)
+    emoteNote.Size = UDim2.new(1, -4, 0, 30); emoteNote.BackgroundTransparency = 1
+    emoteNote.Text = "  Opens all emotes in the emote wheel.\n  Unowned emotes play client-side only."
+    emoteNote.TextColor3 = C.dim; emoteNote.TextSize = 10; emoteNote.Font = Enum.Font.Gotham
+    emoteNote.TextXAlignment = Enum.TextXAlignment.Left; emoteNote.TextWrapped = true; emoteNote.LayoutOrder = nextOrd()
+
     mkSpacer(6)
 
     -- Keybind
@@ -1894,6 +2416,12 @@ local function createUI()
             local ok = Unlocker.enable()
             unlockStatus.Text = ok and "  Status: Active" or "  Status: Failed"
             unlockStatus.TextColor3 = ok and C.accent2 or C.danger
+        end
+        if Config.emote_enabled then
+            emoteStatus.Text = "  Emotes: Loading..."
+            local ok = Emotes.enable()
+            emoteStatus.Text = ok and "  Emotes: Active" or "  Emotes: Failed"
+            emoteStatus.TextColor3 = ok and C.accent2 or C.danger
         end
     end)
 
