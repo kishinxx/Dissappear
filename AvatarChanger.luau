@@ -27,9 +27,11 @@ local newcclosure = newcclosure or function(f) return f end
 local cloneref = cloneref or function(o) return o end
 local getrawmetatable = getrawmetatable or getmetatable
 local setreadonly = setreadonly or function() end
-local getconnections = getconnections or nil
-local getupvalues = getupvalues or getupvals or nil
-local islclosure = islclosure or isourclosure or function() return false end
+local getconnections = getconnections or get_signal_cons or nil
+local getupvalues = getupvalues or getupvals or debug and debug.getupvalues or nil
+local setupvalue = setupvalue or setupval or debug and debug.setupvalue or nil
+local getupvalue = getupvalue or getupval or debug and debug.getupvalue or nil
+local islclosure = islclosure or isourclosure or is_l_closure or isluaclosure or nil
 
 ------------------------------------------------------------------------
 -- SERVICES (cloneref where supported to reduce anti-cheat surface)
@@ -161,8 +163,10 @@ local State = {
     buy_button_conns = {},
     swords_module = nil,
     swords_controller = nil,
+    sword_info_handler = nil,
     replicated_instances = nil,
     sword_char_conns = {},
+    sword_attr_conns = {},
     sword_busy = false,
 
     -- Emotes
@@ -1285,22 +1289,42 @@ end
 
 Unlocker.findSwordsController = function()
     if State.swords_controller then return State.swords_controller end
-    if not getconnections then return nil end
+    if not getconnections or not getupvalues then
+        warn("[Swords] getconnections or getupvalues not available")
+        return nil
+    end
     local ok, remote = pcall(function()
         return ReplicatedStorage:WaitForChild("Remotes", 5) and ReplicatedStorage.Remotes:FindFirstChild("FireSwordInfo")
     end)
-    if not ok or not remote then return nil end
+    if not ok or not remote then
+        warn("[Swords] FireSwordInfo remote not found")
+        return nil
+    end
     local ok2, conns = pcall(getconnections, remote.OnClientEvent)
-    if not ok2 or typeof(conns) ~= "table" then return nil end
+    if not ok2 or typeof(conns) ~= "table" then
+        warn("[Swords] Failed to get connections")
+        return nil
+    end
     for _, conn in ipairs(conns) do
-        if conn.Function and islclosure(conn.Function) then
-            local ok3, upvals = pcall(getupvalues, conn.Function)
-            if ok3 and typeof(upvals) == "table" and #upvals == 1 and typeof(upvals[1]) == "table" then
-                State.swords_controller = upvals[1]
-                return upvals[1]
+        local fn = conn.Function or conn.function
+        if fn then
+            local isLua = true
+            if islclosure then
+                local ok4, result = pcall(islclosure, fn)
+                isLua = ok4 and result
+            end
+            if isLua then
+                local ok3, upvals = pcall(getupvalues, fn)
+                if ok3 and typeof(upvals) == "table" and #upvals == 1 and typeof(upvals[1]) == "table" then
+                    State.swords_controller = upvals[1]
+                    State.sword_info_handler = fn
+                    warn("[Swords] Found swords_controller")
+                    return upvals[1]
+                end
             end
         end
     end
+    warn("[Swords] Controller not found in " .. tostring(#conns) .. " connections")
     return nil
 end
 
@@ -1371,13 +1395,50 @@ Unlocker.cleanupSwordCharConns = function()
         pcall(function() c:Disconnect() end)
     end
     State.sword_char_conns = {}
+    for _, c in ipairs(State.sword_attr_conns) do
+        pcall(function() c:Disconnect() end)
+    end
+    State.sword_attr_conns = {}
+end
+
+-- Called when the game changes CurrentlyEquippedSword (e.g. FireSwordInfo fires)
+-- This is the key to keeping VFX/SFX and the custom model persistent
+Unlocker.onSwordAttributeChanged = function()
+    if not State.unlock_active then return end
+    local name = State.equipped_skins.Sword
+    if not name or name == "" then return end
+    local char = localPlayer.Character
+    if not char then return end
+
+    -- If our model is already there, just re-set VFX/SFX
+    if char:FindFirstChild(name) then
+        -- Re-set attributes to our sword
+        pcall(function() char:SetAttribute("CurrentlyEquippedSword", name) end)
+        pcall(function() localPlayer:SetAttribute("CurrentlyEquippedSword", name) end)
+        -- Re-set VFX/SFX
+        local sc = State.swords_controller
+        if sc then
+            pcall(function() sc:SetSword(name) end)
+        end
+        return
+    end
+
+    -- Our model is gone, re-apply everything
+    task.delay(0.06, function()
+        if localPlayer.Character ~= char then return end
+        if not State.unlock_active then return end
+        State.sword_busy = false
+        Unlocker.applySwordModel(char, name, true)
+    end)
 end
 
 Unlocker.monitorCharacter = function(char)
     if not char then return end
-    Unlocker.cleanupSwordCharConns()
-    local swordName = State.equipped_skins.Sword
-    if not swordName or swordName == "" then return end
+    -- Clean up old char connections but keep attr connections
+    for _, c in ipairs(State.sword_char_conns) do
+        pcall(function() c:Disconnect() end)
+    end
+    State.sword_char_conns = {}
 
     -- When the game removes our custom sword model, re-apply it
     table.insert(State.sword_char_conns, char.ChildRemoved:Connect(function(child)
@@ -1397,7 +1458,7 @@ Unlocker.monitorCharacter = function(char)
         end
     end))
 
-    -- When the game adds the real sword (after respawn), replace it with ours
+    -- When the game adds a different sword model, replace with ours
     table.insert(State.sword_char_conns, char.ChildAdded:Connect(function(child)
         if State.sword_busy then return end
         if not State.unlock_active then return end
@@ -1412,19 +1473,26 @@ Unlocker.monitorCharacter = function(char)
             end)
         end
     end))
+
+    -- Monitor CurrentlyEquippedSword attribute on this character
+    table.insert(State.sword_char_conns, char:GetAttributeChangedSignal("CurrentlyEquippedSword"):Connect(Unlocker.onSwordAttributeChanged))
 end
 
 Unlocker.setupRespawn = function()
     if State.sword_respawn_conn then
         pcall(function() State.sword_respawn_conn:Disconnect() end)
     end
+
+    -- Monitor attribute on player (persists across respawns)
+    table.insert(State.sword_attr_conns, localPlayer:GetAttributeChangedSignal("CurrentlyEquippedSword"):Connect(Unlocker.onSwordAttributeChanged))
+
     State.sword_respawn_conn = localPlayer.CharacterAdded:Connect(function(char)
         task.defer(function()
             if not State.unlock_active then return end
             local name = State.equipped_skins.Sword
             if not name or name == "" then return end
             Unlocker.monitorCharacter(char)
-            -- Wait for character to be alive and have a sword equipped
+            -- Wait for character to be alive and have a sword
             local deadline = os.clock() + 8
             while os.clock() < deadline do
                 if localPlayer.Character ~= char then return end
@@ -1447,7 +1515,12 @@ Unlocker.setupRespawn = function()
             -- Apply with retries
             for i = 1, 4 do
                 if localPlayer.Character ~= char then return end
-                if char:FindFirstChild(name) then return end
+                if char:FindFirstChild(name) then
+                    -- Model there but VFX might not be set, force it
+                    local sc = State.swords_controller
+                    if sc then pcall(function() sc:SetSword(name) end) end
+                    return
+                end
                 State.sword_busy = false
                 Unlocker.applySwordModel(char, name, true)
                 task.wait(0.25)
@@ -1455,6 +1528,13 @@ Unlocker.setupRespawn = function()
         end)
     end)
     addConn(State.sword_respawn_conn)
+
+    -- Set up monitoring on current character immediately
+    if localPlayer.Character then
+        task.defer(function()
+            Unlocker.monitorCharacter(localPlayer.Character)
+        end)
+    end
 end
 
 Unlocker.equipSword = function(name)
