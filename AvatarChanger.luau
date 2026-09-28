@@ -32,6 +32,7 @@ local getupvalues = getupvalues or getupvals or debug and debug.getupvalues or n
 local setupvalue = setupvalue or setupval or debug and debug.setupvalue or nil
 local getupvalue = getupvalue or getupval or debug and debug.getupvalue or nil
 local islclosure = islclosure or isourclosure or is_l_closure or isluaclosure or nil
+local getinfo = getinfo or debug and debug.getinfo or nil
 
 ------------------------------------------------------------------------
 -- SERVICES (cloneref where supported to reduce anti-cheat surface)
@@ -168,6 +169,11 @@ local State = {
     sword_char_conns = {},
     sword_attr_conns = {},
     sword_busy = false,
+    parry_func = nil,
+    parry_orig_conn = nil,
+    parry_client_conn = nil,
+    parry_our_conn = nil,
+    slash_name = "SlashEffect",
 
     -- Emotes
     emote_enabled = false,
@@ -220,6 +226,11 @@ local function cleanupAll()
             pcall(function() State.inventory_shared[k] = v end)
         end
     end
+    -- Re-enable original parry handler
+    if State.parry_our_conn then pcall(function() State.parry_our_conn:Disconnect() end); State.parry_our_conn = nil end
+    if State.parry_orig_conn then pcall(function() State.parry_orig_conn:Enable() end); State.parry_orig_conn = nil end
+    if State.parry_client_conn then pcall(function() State.parry_client_conn:Enable() end); State.parry_client_conn = nil end
+    State.parry_func = nil
 end
 
 _G._AvatarChangerCleanup = cleanupAll
@@ -1328,6 +1339,139 @@ Unlocker.findSwordsController = function()
     return nil
 end
 
+Unlocker.getSlashName = function(swordName)
+    if not swordName or swordName == "" then return "SlashEffect" end
+    local swordsMod = Unlocker.findSwordsModule()
+    if swordsMod and typeof(swordsMod.GetSword) == "function" then
+        local ok, info = pcall(function() return swordsMod:GetSword(swordName) end)
+        if ok and info and info.SlashName then return info.SlashName end
+    end
+    return "SlashEffect"
+end
+
+Unlocker.setupParryIntercept = function()
+    if State.parry_our_conn then return end
+    if not getconnections then
+        warn("[Swords] getconnections not available, can't intercept parry VFX")
+        return
+    end
+
+    local remotes = ReplicatedStorage:FindFirstChild("Remotes")
+    if not remotes then return end
+    local parryRemote = remotes:FindFirstChild("ParrySuccessAll")
+    if not parryRemote then return end
+
+    local parryFunc = nil
+    local origConn = nil
+
+    local ok, conns = pcall(getconnections, parryRemote.OnClientEvent)
+    if not ok or typeof(conns) ~= "table" then return end
+
+    for _, conn in ipairs(conns) do
+        local fn = conn.Function or conn["function"]
+        if fn then
+            local nameMatch = false
+            if getinfo then
+                local ok2, info = pcall(getinfo, fn)
+                if ok2 and typeof(info) == "table" and info.name == "parrySuccessAll" then
+                    nameMatch = true
+                end
+            else
+                local isLua = true
+                if islclosure then
+                    local ok3, r = pcall(islclosure, fn)
+                    isLua = ok3 and r
+                end
+                nameMatch = isLua
+            end
+            if nameMatch then
+                parryFunc = fn
+                origConn = conn
+                break
+            end
+        end
+    end
+
+    if not parryFunc or not origConn then
+        warn("[Swords] Could not find parrySuccessAll handler")
+        return
+    end
+
+    pcall(function() origConn:Disable() end)
+    State.parry_func = parryFunc
+    State.parry_orig_conn = origConn
+
+    local clientRemote = remotes:FindFirstChild("ParrySuccessClient")
+    if clientRemote then
+        local ok2, cConns = pcall(getconnections, clientRemote.Event)
+        if ok2 and typeof(cConns) == "table" then
+            for _, conn in ipairs(cConns) do
+                local fn = conn.Function or conn["function"]
+                if fn then
+                    local nameMatch = false
+                    if getinfo then
+                        local ok3, info = pcall(getinfo, fn)
+                        nameMatch = ok3 and typeof(info) == "table" and info.name == "parrySuccessAll"
+                    end
+                    if nameMatch then
+                        pcall(function() conn:Disable() end)
+                        State.parry_client_conn = conn
+                        break
+                    end
+                end
+            end
+        end
+    end
+
+    State.parry_our_conn = parryRemote.OnClientEvent:Connect(function(...)
+        if not State.parry_func then return end
+
+        if not State.unlock_active or not State.equipped_skins.Sword or State.equipped_skins.Sword == "" then
+            return State.parry_func(...)
+        end
+
+        local args = {...}
+        local argCount = select("#", ...)
+
+        local swordName = State.equipped_skins.Sword
+        local isUs = false
+
+        if argCount >= 4 and typeof(args[4]) == "Instance" and args[4]:IsA("Player") then
+            isUs = args[4] == localPlayer
+        else
+            local char = localPlayer.Character
+            if char and typeof(args[2]) == "Instance" then
+                isUs = args[2] == char or args[2].Parent == char
+            end
+        end
+
+        if isUs then
+            args[1] = State.slash_name
+            args[3] = swordName
+        end
+
+        return State.parry_func(unpack(args, 1, argCount))
+    end)
+
+    warn("[Swords] Parry VFX intercept active — slash: " .. State.slash_name)
+end
+
+Unlocker.cleanupParryIntercept = function()
+    if State.parry_our_conn then
+        pcall(function() State.parry_our_conn:Disconnect() end)
+        State.parry_our_conn = nil
+    end
+    if State.parry_orig_conn then
+        pcall(function() State.parry_orig_conn:Enable() end)
+        State.parry_orig_conn = nil
+    end
+    if State.parry_client_conn then
+        pcall(function() State.parry_client_conn:Enable() end)
+        State.parry_client_conn = nil
+    end
+    State.parry_func = nil
+end
+
 Unlocker.applySwordModel = function(char, swordName, forceModel)
     if not char then return false end
     State.sword_busy = true
@@ -1336,14 +1480,8 @@ Unlocker.applySwordModel = function(char, swordName, forceModel)
         char:SetAttribute("CurrentlyEquippedSword", swordName)
         localPlayer:SetAttribute("CurrentlyEquippedSword", swordName)
 
-        -- Set slash effect name
-        local swordsMod = Unlocker.findSwordsModule()
-        if swordsMod and typeof(swordsMod.GetSword) == "function" then
-            local info = swordsMod:GetSword(swordName)
-            if info and info.SlashName then
-                char:SetAttribute("SlashEffect", info.SlashName)
-            end
-        end
+        -- Update slash name for parry VFX intercept
+        State.slash_name = Unlocker.getSlashName(swordName)
 
         -- Set VFX/SFX via swords_controller:SetSword
         local sc = Unlocker.findSwordsController()
@@ -1933,6 +2071,45 @@ Unlocker.enable = function()
             if Unlocker.findSwordsController() then break end
             task.wait(0.5)
         end
+        -- Once swords_controller is found, set up parry VFX interception
+        if State.swords_controller then
+            -- Update slash_name if a sword is already equipped
+            local name = State.equipped_skins.Sword
+            if name and name ~= "" then
+                State.slash_name = Unlocker.getSlashName(name)
+            end
+            Unlocker.setupParryIntercept()
+        end
+    end)
+
+    -- Periodic re-apply loop (like Zenthra/Allusive — ensures VFX stays set)
+    task.spawn(function()
+        while State.unlock_active do
+            task.wait(1)
+            if not State.unlock_active then break end
+            local name = State.equipped_skins.Sword
+            if name and name ~= "" then
+                local char = localPlayer.Character
+                if char then
+                    if localPlayer:GetAttribute("CurrentlyEquippedSword") ~= name then
+                        pcall(function() char:SetAttribute("CurrentlyEquippedSword", name) end)
+                        pcall(function() localPlayer:SetAttribute("CurrentlyEquippedSword", name) end)
+                    end
+                    local sc = State.swords_controller
+                    if sc then
+                        pcall(function() sc:SetSword(name) end)
+                    end
+                    -- Destroy stray sword models
+                    if State.item_info then
+                        for _, child in ipairs(char:GetChildren()) do
+                            if child:IsA("Model") and State.item_info.Sword[child.Name] and child.Name ~= name then
+                                child:Destroy()
+                            end
+                        end
+                    end
+                end
+            end
+        end
     end)
 
     -- Set up respawn monitoring for sword persistence
@@ -1949,6 +2126,7 @@ Unlocker.disable = function()
     State.merged_cache = { Sword = nil, Explosion = nil }
     State.merged_ref = { Sword = nil, Explosion = nil }
     State.shop_spoofed = false
+    Unlocker.cleanupParryIntercept()
     Unlocker.cleanupSwordCharConns()
     if State.sword_respawn_conn then
         pcall(function() State.sword_respawn_conn:Disconnect() end)
