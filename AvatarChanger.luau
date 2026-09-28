@@ -23,23 +23,32 @@ local env = getgenv()
 local writefile = writefile or function() end
 local readfile = readfile or function() return nil end
 local isfile = isfile or function() return false end
-local newcclosure = newcclosure or function(f) return f end
+local _rawNewcclosure = newcclosure
+local newcclosure = function(f)
+    if not _rawNewcclosure then return f end
+    local ok, result = pcall(_rawNewcclosure, f)
+    return ok and result or f
+end
 local cloneref = cloneref or function(o) return o end
 local getrawmetatable = getrawmetatable or getmetatable
 local setreadonly = setreadonly or function() end
 
 ------------------------------------------------------------------------
--- SERVICES (cloneref to avoid anti-cheat reference checks)
+-- SERVICES (cloneref where supported to reduce anti-cheat surface)
 ------------------------------------------------------------------------
-local Players = cloneref(game:GetService("Players"))
-local RunService = cloneref(game:GetService("RunService"))
-local ReplicatedStorage = cloneref(game:GetService("ReplicatedStorage"))
-local CoreGui = cloneref(game:GetService("CoreGui"))
-local TextChatService = cloneref(game:GetService("TextChatService"))
-local InsertService = cloneref(game:GetService("InsertService"))
-local UserInputService = cloneref(game:GetService("UserInputService"))
-local TweenService = cloneref(game:GetService("TweenService"))
-local HttpService = cloneref(game:GetService("HttpService"))
+local function safeClone(svc)
+    local ok, result = pcall(cloneref, svc)
+    return ok and result or svc
+end
+local Players = safeClone(game:GetService("Players"))
+local RunService = safeClone(game:GetService("RunService"))
+local ReplicatedStorage = safeClone(game:GetService("ReplicatedStorage"))
+local CoreGui = safeClone(game:GetService("CoreGui"))
+local TextChatService = safeClone(game:GetService("TextChatService"))
+local InsertService = safeClone(game:GetService("InsertService"))
+local UserInputService = safeClone(game:GetService("UserInputService"))
+local TweenService = safeClone(game:GetService("TweenService"))
+local HttpService = safeClone(game:GetService("HttpService"))
 
 local localPlayer = Players.LocalPlayer
 local playerGui = localPlayer:WaitForChild("PlayerGui")
@@ -1220,7 +1229,7 @@ Unlocker.hookInventory = function()
     end
 
     -- Hook shared.Get — merge all catalog items into owned items
-    shared.Get = newcclosure(function(self, player, itemType)
+    shared.Get = function(self, player, itemType)
         local result = orig.Get(self, player, itemType)
         if not State.unlock_active or player ~= nil or not ITEM_TYPES[itemType] then
             return result
@@ -1243,10 +1252,10 @@ Unlocker.hookInventory = function()
         State.merged_cache[itemType] = merged
         State.merged_ref[itemType] = result
         return merged
-    end)
+    end
 
     -- Hook shared.GetItem — return fake for anything in catalog
-    shared.GetItem = newcclosure(function(self, player, itemType, itemName)
+    shared.GetItem = function(self, player, itemType, itemName)
         local result = orig.GetItem(self, player, itemType, itemName)
         if result or not State.unlock_active or player ~= nil or not ITEM_TYPES[itemType] then
             return result
@@ -1267,27 +1276,27 @@ Unlocker.hookInventory = function()
             return conv
         end
         return result
-    end)
+    end
 
     -- Hook shared.GetEquipped — return spoofed equipped skin
-    shared.GetEquipped = newcclosure(function(self, player, itemType)
+    shared.GetEquipped = function(self, player, itemType)
         if State.unlock_active and player == nil and ITEM_TYPES[itemType] then
             local equipped = State.equipped_skins[itemType]
             if equipped then return equipped end
         end
         return orig.GetEquipped(self, player, itemType)
-    end)
+    end
 
     -- Hook shared.OnEquip — track callbacks
-    shared.OnEquip = newcclosure(function(self, player, itemType, callback)
+    shared.OnEquip = function(self, player, itemType, callback)
         if player == nil and ITEM_TYPES[itemType] then
             table.insert(State.equip_callbacks[itemType], callback)
         end
         return orig.OnEquip(self, player, itemType, callback)
-    end)
+    end
 
     -- Hook shared.OnInventoryChange — track callbacks + bust cache
-    shared.OnInventoryChange = newcclosure(function(self, player, itemType, callback)
+    shared.OnInventoryChange = function(self, player, itemType, callback)
         if player == nil and ITEM_TYPES[itemType] then
             table.insert(State.inv_change_callbacks[itemType], callback)
             return orig.OnInventoryChange(self, player, itemType, function(...)
@@ -1298,11 +1307,11 @@ Unlocker.hookInventory = function()
             end)
         end
         return orig.OnInventoryChange(self, player, itemType, callback)
-    end)
+    end
 
     -- Hook FindItemsWithKey
     if typeof(orig.FindItemsWithKey) == "function" then
-        shared.FindItemsWithKey = newcclosure(function(self, player, itemType, key)
+        shared.FindItemsWithKey = function(self, player, itemType, key)
             local result = orig.FindItemsWithKey(self, player, itemType, key)
             if not State.unlock_active or player ~= nil or not ITEM_TYPES[itemType] then
                 return result
@@ -1319,7 +1328,7 @@ Unlocker.hookInventory = function()
                 return { itemName }
             end
             return result
-        end)
+        end
     end
 
     -- Hook client.Equip / Unequip
@@ -1328,14 +1337,14 @@ Unlocker.hookInventory = function()
         local origUnequip = client.Unequip
 
         if origEquip then
-            client.Equip = newcclosure(function(self, itemId, ...)
+            client.Equip = function(self, itemId, ...)
                 if Unlocker.interceptEquip(itemId) then return true end
                 return origEquip(self, itemId, ...)
-            end)
+            end
         end
 
         if origUnequip then
-            client.Unequip = newcclosure(function(self, itemType, ...)
+            client.Unequip = function(self, itemType, ...)
                 if State.unlock_active and (itemType == "Sword" or itemType == "Explosion") then
                     State.equipped_skins[itemType] = nil
                     Config["equipped_" .. itemType:lower()] = nil; persistConfig()
@@ -1344,7 +1353,7 @@ Unlocker.hookInventory = function()
                     return true
                 end
                 return origUnequip(self, itemType, ...)
-            end)
+            end
         end
     end
 
