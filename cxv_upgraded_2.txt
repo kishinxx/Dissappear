@@ -6372,10 +6372,6 @@ local autoParryToggle = MainTab:CreateToggle({
 
                     if parryActive then return end
 
-                    if _G.config.random_accuracy then
-                        rollRandomAccuracy()
-                    end
-
                     local ballTarget = ball:GetAttribute("target")
                     local realBallTarget = realBall:GetAttribute("target")
                     local velocity = zoomies.VectorVelocity
@@ -6413,12 +6409,19 @@ local autoParryToggle = MainTab:CreateToggle({
                     if _G.config.det_slashes and Det.Slashes_Active then return end
                     if _G.config.det_forcefield and Det.Forcefield_Active then return end
 
-                    if ballTarget == LocalPlayer.Name and distance <= targetDistance then
-                        if _G.config.animfix then
-                            playParryFix()
+                    if ballTarget == LocalPlayer.Name then
+                        if _G.config.random_accuracy then
+                            pcall(rollRandomAccuracy)
+                            speedDivisor = calcSpeedDivisorBase(rawSpeed) * SpeedDivisorMultiplier
+                            targetDistance = pingThreshold + math.max(rawSpeed / speedDivisor, 9.5) * speedFactor
                         end
-                        BallHelper.parry(_G.config.curve_method)
-                        parryActive = true
+                        if distance <= targetDistance then
+                            if _G.config.animfix then
+                                playParryFix()
+                            end
+                            BallHelper.parry(_G.config.curve_method)
+                            parryActive = true
+                        end
                     end
 
                     local startTime = tick()
@@ -6860,10 +6863,7 @@ end)
 local triggerActive = false
 local function isInRound()
     local char = LocalPlayer.Character
-    if not char then return false end
-    local alive = workspace:FindFirstChild("Alive")
-    if not alive then return true end
-    return char.Parent == alive
+    return char and char.Parent == workspace:FindFirstChild("Alive")
 end
 
 local function Trigger(ball)
