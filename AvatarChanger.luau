@@ -1483,34 +1483,86 @@ Unlocker.cleanupParryIntercept = function()
     State.parry_func = nil
 end
 
+Unlocker.equipSwordWithSetupvalue = function(char, swordName)
+    local swordsMod = Unlocker.findSwordsModule()
+    if not swordsMod or typeof(swordsMod.EquipSwordTo) ~= "function" then return false end
+    if not getupvalues or not setupvalue then
+        pcall(function() swordsMod:EquipSwordTo(char, swordName) end)
+        return char:FindFirstChild(swordName) ~= nil
+    end
+
+    local model = Unlocker.fetchSwordModel(swordName)
+    if not model then
+        pcall(function() swordsMod:EquipSwordTo(char, swordName) end)
+        return char:FindFirstChild(swordName) ~= nil
+    end
+
+    local ok2, upvals = pcall(getupvalues, swordsMod.EquipSwordTo)
+    if not ok2 or typeof(upvals) ~= "table" then
+        pcall(function() swordsMod:EquipSwordTo(char, swordName) end)
+        return char:FindFirstChild(swordName) ~= nil
+    end
+
+    local origTable = nil
+    local origIdx = nil
+    local boolIdx = nil
+    for i, v in ipairs(upvals) do
+        if typeof(v) == "table" and typeof(rawget(v, "getInstance")) == "function" then
+            origTable = v
+            origIdx = i
+        elseif typeof(v) == "boolean" and not boolIdx then
+            boolIdx = i
+        end
+    end
+
+    if not origIdx or not origTable then
+        pcall(function() swordsMod:EquipSwordTo(char, swordName) end)
+        return char:FindFirstChild(swordName) ~= nil
+    end
+
+    local fakeTable = { getInstance = function(self, name)
+        if name == swordName then return model end
+        return Unlocker.fetchSwordModel(name)
+    end }
+
+    pcall(function()
+        if boolIdx then setupvalue(swordsMod.EquipSwordTo, boolIdx, false) end
+        setupvalue(swordsMod.EquipSwordTo, origIdx, fakeTable)
+    end)
+
+    local equipOk = pcall(function() swordsMod:EquipSwordTo(char, swordName) end)
+
+    pcall(function()
+        setupvalue(swordsMod.EquipSwordTo, origIdx, origTable)
+        if boolIdx then setupvalue(swordsMod.EquipSwordTo, boolIdx, true) end
+    end)
+
+    return equipOk and char:FindFirstChild(swordName) ~= nil
+end
+
 Unlocker.applySwordModel = function(char, swordName, forceModel)
     if not char then return false end
     State.sword_busy = true
     local ok = pcall(function()
-        -- Set attributes first so game systems recognize the sword
         char:SetAttribute("CurrentlyEquippedSword", swordName)
         localPlayer:SetAttribute("CurrentlyEquippedSword", swordName)
 
-        -- Update slash name for parry VFX intercept
         State.slash_name = Unlocker.getSlashName(swordName)
 
-        -- Set VFX/SFX via swords_controller:SetSword
         local sc = Unlocker.findSwordsController()
         if sc then
             pcall(function() sc:SetSword(swordName) end)
         end
 
-        -- Pre-load model into ReplicatedInstances cache
-        local ri = Unlocker.findReplicatedInstances()
-        if ri and typeof(ri.GetInstance) == "function" then
-            ri:GetInstance("Swords", swordName)
-        end
-
-        -- Equip model if not already present or forced
         if forceModel or not char:FindFirstChild(swordName) then
-            if swordsMod and typeof(swordsMod.EquipSwordTo) == "function" then
-                pcall(function() swordsMod:EquipSwordTo(char, swordName) end)
+            for _, child in ipairs(char:GetChildren()) do
+                if child:IsA("Model") and child.Name ~= swordName and State.item_info and State.item_info.Sword[child.Name] then
+                    child:Destroy()
+                end
             end
+
+            Unlocker.equipSwordWithSetupvalue(char, swordName)
+
             if not char:FindFirstChild(swordName) then
                 local model = Unlocker.fetchSwordModel(swordName)
                 if model then
