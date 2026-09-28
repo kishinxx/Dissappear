@@ -53,9 +53,7 @@ _G.config = {
     det_forcefield = nil,
     det_staff = nil,
     det_staff_action = nil,
-    animfix_parry = nil,
-    animfix_spam = nil,
-    animfix_manual = nil,
+    animfix = nil,
     player_cosmetics = nil,
     triggerbot_notify = nil,
     manual_spam_ui = nil,
@@ -6400,7 +6398,7 @@ local autoParryToggle = MainTab:CreateToggle({
                     if _G.config.det_forcefield and Det.Forcefield_Active then return end
 
                     if ballTarget == LocalPlayer.Name and distance <= targetDistance then
-                        if _G.config.animfix_parry and tick() - lastParryFix > 0.5 then
+                        if _G.config.animfix and tick() - lastParryFix > 0.5 then
                             lastParryFix = tick()
                             playParryFix()
                         end
@@ -6734,10 +6732,10 @@ MainTab:CreateToggle({
 
 MainTab:CreateToggle({
     Name = "Animation Fix",
-    CurrentValue = _G.config.animfix_parry or false,
-    Flag = "AnimFixParry",
+    CurrentValue = _G.config.animfix or false,
+    Flag = "AnimFix",
     Callback = function(enabled)
-        _G.config.animfix_parry = enabled
+        _G.config.animfix = enabled
     end,
 })
 
@@ -6949,7 +6947,7 @@ MainTab:CreateToggle({
                 if ballDist <= maxAccuracy and parryCount > threshold then
                     if tick() - lastAutoParryFire >= fireDelay then
                         lastAutoParryFire = tick()
-                        if _G.config.animfix_spam then playParryFix() end
+                        if _G.config.animfix then playParryFix() end
                         BallHelper.parry()
                     end
                 end
@@ -6976,15 +6974,6 @@ MainTab:CreateSlider({
     end
 })
 
-MainTab:CreateToggle({
-    Name = "Animation Fix",
-    CurrentValue = _G.config.animfix_spam or false,
-    Flag = "AnimFixSpam",
-    Callback = function(enabled)
-        _G.config.animfix_spam = enabled
-    end,
-})
-
 UserInputService.InputBegan:Connect(function(input, gameProcessed)
     if gameProcessed then return end
     if input.KeyCode == Enum.KeyCode.E then
@@ -7007,7 +6996,7 @@ local manualSpamToggle = MainTab:CreateToggle({
 
                 if tick() - lastParryTick >= delay then
                     lastParryTick = tick()
-                    if _G.config.animfix_manual then playParryFix() end
+                    if _G.config.animfix then playParryFix() end
                     BallHelper.parry()
                 end
             end)
@@ -7072,15 +7061,6 @@ MainTab:CreateSlider({
             _G.config.manual_spam_kps = math.floor(tonumber(value) or 100)
         end)
     end
-})
-
-MainTab:CreateToggle({
-    Name = "Animation Fix",
-    CurrentValue = _G.config.animfix_manual or false,
-    Flag = "AnimFixManual",
-    Callback = function(enabled)
-        _G.config.animfix_manual = enabled
-    end,
 })
 
 local mobileGui = Instance.new("ScreenGui")
