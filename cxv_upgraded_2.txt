@@ -79,6 +79,7 @@ _G.config = {
     ability_triggerbot_mode = nil,
     ability_triggerbot_ms = nil,
     manual_spam_mode = nil,
+    triggerbot_detection = nil,
 }
 
 if not isfolder("angeli/configs") then
@@ -6372,7 +6373,7 @@ local autoParryToggle = MainTab:CreateToggle({
                 Library:Notify({ Title = "Auto Parry", Content = "On", Duration = 2 })
             end
             Connections.auto_parry = RunService.PreSimulation:Connect(function()
-                if _G.triggerbot then return end
+                if _G.config.triggerbot_detection and (_G.triggerbot or _G.ability_triggerbot) then return end
                 if not isInRound() then return end
                 if not LocalPlayer.Character or not LocalPlayer.Character.PrimaryPart then return end
 
@@ -6833,6 +6834,15 @@ MainTab:CreateToggle({
     Flag = "AnimFix",
     Callback = function(enabled)
         _G.config.animfix = enabled
+    end,
+})
+
+MainTab:CreateToggle({
+    Name = "Triggerbot Detection",
+    CurrentValue = _G.config.triggerbot_detection or false,
+    Flag = "TriggerbotDetection",
+    Callback = function(enabled)
+        _G.config.triggerbot_detection = enabled
     end,
 })
 
