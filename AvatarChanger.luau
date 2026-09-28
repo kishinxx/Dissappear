@@ -15,27 +15,6 @@
 ]]
 
 ------------------------------------------------------------------------
--- SERVICES
-------------------------------------------------------------------------
-local Players = game:GetService("Players")
-local RunService = game:GetService("RunService")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local CoreGui = game:GetService("CoreGui")
-local TextChatService = game:GetService("TextChatService")
-local InsertService = game:GetService("InsertService")
-local UserInputService = game:GetService("UserInputService")
-local TweenService = game:GetService("TweenService")
-local HttpService = game:GetService("HttpService")
-
-local localPlayer = Players.LocalPlayer
-local playerGui = localPlayer:WaitForChild("PlayerGui")
-
--- Cleanup previous instance
-if _G._AvatarChangerCleanup then
-    pcall(_G._AvatarChangerCleanup)
-end
-
-------------------------------------------------------------------------
 -- GLOBALS / EXECUTOR COMPAT
 ------------------------------------------------------------------------
 local hookfunction = hookfunction or hookfunc or replaceclosure or detour_function
@@ -44,8 +23,31 @@ local env = getgenv()
 local writefile = writefile or function() end
 local readfile = readfile or function() return nil end
 local isfile = isfile or function() return false end
-local getrawmetatable = getrawmetatable or debug.getmetatable or getmetatable
+local newcclosure = newcclosure or function(f) return f end
+local cloneref = cloneref or function(o) return o end
+local getrawmetatable = getrawmetatable or getmetatable
 local setreadonly = setreadonly or function() end
+
+------------------------------------------------------------------------
+-- SERVICES (cloneref to avoid anti-cheat reference checks)
+------------------------------------------------------------------------
+local Players = cloneref(game:GetService("Players"))
+local RunService = cloneref(game:GetService("RunService"))
+local ReplicatedStorage = cloneref(game:GetService("ReplicatedStorage"))
+local CoreGui = cloneref(game:GetService("CoreGui"))
+local TextChatService = cloneref(game:GetService("TextChatService"))
+local InsertService = cloneref(game:GetService("InsertService"))
+local UserInputService = cloneref(game:GetService("UserInputService"))
+local TweenService = cloneref(game:GetService("TweenService"))
+local HttpService = cloneref(game:GetService("HttpService"))
+
+local localPlayer = Players.LocalPlayer
+local playerGui = localPlayer:WaitForChild("PlayerGui")
+
+-- Cleanup previous instance
+if _G._AvatarChangerCleanup then
+    pcall(_G._AvatarChangerCleanup)
+end
 
 ------------------------------------------------------------------------
 -- CONFIG PERSISTENCE
@@ -951,11 +953,11 @@ end
 
 -- Hook __newindex on virtual items table so new items get hooked automatically
 Unlocker.hookVirtualItemsTable = function(tbl, itemType)
-    local getRawMT = getrawmetatable or getmetatable
-    local mt = getRawMT(tbl) or {}
+    local mt = getrawmetatable(tbl) or {}
+    pcall(setreadonly, mt, false)
     local oldNewindex = mt.__newindex
 
-    mt.__newindex = function(t, k, v)
+    mt.__newindex = newcclosure(function(t, k, v)
         if typeof(v) == "table" then
             pcall(Unlocker.hookVirtualItem, v, k, itemType)
             if State.unlock_active and State.shop_spoofed then
@@ -966,7 +968,7 @@ Unlocker.hookVirtualItemsTable = function(tbl, itemType)
             return oldNewindex(t, k, v)
         end
         rawset(t, k, v)
-    end
+    end)
 
     pcall(setmetatable, tbl, mt)
 end
@@ -1205,8 +1207,20 @@ Unlocker.hookInventory = function()
     }
     local orig = State.original_funcs
 
+    -- Unlock module tables for writing (may be frozen by game)
+    pcall(function()
+        local mt = getrawmetatable(shared)
+        if mt then setreadonly(mt, false) end
+    end)
+    if client then
+        pcall(function()
+            local mt = getrawmetatable(client)
+            if mt then setreadonly(mt, false) end
+        end)
+    end
+
     -- Hook shared.Get — merge all catalog items into owned items
-    shared.Get = function(self, player, itemType)
+    shared.Get = newcclosure(function(self, player, itemType)
         local result = orig.Get(self, player, itemType)
         if not State.unlock_active or player ~= nil or not ITEM_TYPES[itemType] then
             return result
@@ -1229,10 +1243,10 @@ Unlocker.hookInventory = function()
         State.merged_cache[itemType] = merged
         State.merged_ref[itemType] = result
         return merged
-    end
+    end)
 
     -- Hook shared.GetItem — return fake for anything in catalog
-    shared.GetItem = function(self, player, itemType, itemName)
+    shared.GetItem = newcclosure(function(self, player, itemType, itemName)
         local result = orig.GetItem(self, player, itemType, itemName)
         if result or not State.unlock_active or player ~= nil or not ITEM_TYPES[itemType] then
             return result
@@ -1253,27 +1267,27 @@ Unlocker.hookInventory = function()
             return conv
         end
         return result
-    end
+    end)
 
     -- Hook shared.GetEquipped — return spoofed equipped skin
-    shared.GetEquipped = function(self, player, itemType)
+    shared.GetEquipped = newcclosure(function(self, player, itemType)
         if State.unlock_active and player == nil and ITEM_TYPES[itemType] then
             local equipped = State.equipped_skins[itemType]
             if equipped then return equipped end
         end
         return orig.GetEquipped(self, player, itemType)
-    end
+    end)
 
     -- Hook shared.OnEquip — track callbacks
-    shared.OnEquip = function(self, player, itemType, callback)
+    shared.OnEquip = newcclosure(function(self, player, itemType, callback)
         if player == nil and ITEM_TYPES[itemType] then
             table.insert(State.equip_callbacks[itemType], callback)
         end
         return orig.OnEquip(self, player, itemType, callback)
-    end
+    end)
 
     -- Hook shared.OnInventoryChange — track callbacks + bust cache
-    shared.OnInventoryChange = function(self, player, itemType, callback)
+    shared.OnInventoryChange = newcclosure(function(self, player, itemType, callback)
         if player == nil and ITEM_TYPES[itemType] then
             table.insert(State.inv_change_callbacks[itemType], callback)
             return orig.OnInventoryChange(self, player, itemType, function(...)
@@ -1284,11 +1298,11 @@ Unlocker.hookInventory = function()
             end)
         end
         return orig.OnInventoryChange(self, player, itemType, callback)
-    end
+    end)
 
     -- Hook FindItemsWithKey
     if typeof(orig.FindItemsWithKey) == "function" then
-        shared.FindItemsWithKey = function(self, player, itemType, key)
+        shared.FindItemsWithKey = newcclosure(function(self, player, itemType, key)
             local result = orig.FindItemsWithKey(self, player, itemType, key)
             if not State.unlock_active or player ~= nil or not ITEM_TYPES[itemType] then
                 return result
@@ -1305,7 +1319,7 @@ Unlocker.hookInventory = function()
                 return { itemName }
             end
             return result
-        end
+        end)
     end
 
     -- Hook client.Equip / Unequip
@@ -1314,14 +1328,14 @@ Unlocker.hookInventory = function()
         local origUnequip = client.Unequip
 
         if origEquip then
-            client.Equip = function(self, itemId, ...)
+            client.Equip = newcclosure(function(self, itemId, ...)
                 if Unlocker.interceptEquip(itemId) then return true end
                 return origEquip(self, itemId, ...)
-            end
+            end)
         end
 
         if origUnequip then
-            client.Unequip = function(self, itemType, ...)
+            client.Unequip = newcclosure(function(self, itemType, ...)
                 if State.unlock_active and (itemType == "Sword" or itemType == "Explosion") then
                     State.equipped_skins[itemType] = nil
                     Config["equipped_" .. itemType:lower()] = nil; persistConfig()
@@ -1330,22 +1344,31 @@ Unlocker.hookInventory = function()
                     return true
                 end
                 return origUnequip(self, itemType, ...)
-            end
+            end)
         end
     end
 
-    -- Hook GetAttribute for sword rendering
+    -- Hook GetAttribute for sword rendering (wrapped in newcclosure to evade anti-cheat)
     if hookfunction then
         pcall(function()
             local origGetAttr = game.GetAttribute
-            hookfunction(game.GetAttribute, function(self, attr)
-                if State.unlock_active then
-                    if attr == "CurrentlyEquippedSword" and State.equipped_skins.Sword then
-                        return State.equipped_skins.Sword
-                    end
+            env.__ZenthraHooks = env.__ZenthraHooks or {}
+            env.__ZenthraHooks.GetAttribute = hookfunction(game.GetAttribute, newcclosure(function(self, attr)
+                local prev = env.__ZenthraHooks and env.__ZenthraHooks.GetAttribute
+                if not State.unlock_active then
+                    if prev then return prev(self, attr) end
+                    return nil
                 end
-                return origGetAttr(self, attr)
-            end)
+                if attr ~= "CurrentlyEquippedSword" and attr ~= "ShowSwordAccessory" then
+                    if prev then return prev(self, attr) end
+                    return nil
+                end
+                if attr == "CurrentlyEquippedSword" and State.equipped_skins.Sword then
+                    return State.equipped_skins.Sword
+                end
+                if prev then return prev(self, attr) end
+                return nil
+            end))
         end)
     end
 
@@ -1483,24 +1506,68 @@ Unlocker.hookInventory = function()
         end
     end)
 
-    -- Hook __namecall on game for RemoteFunction/RemoteEvent interception (fallback)
-    local hookmetamethod = hookmetamethod or getgenv and getgenv().hookmetamethod
-    if hookmetamethod then
-        pcall(function()
-            local origNamecall = hookmetamethod(game, "__namecall", function(self, ...)
-                local method = getnamecallmethod and getnamecallmethod()
-                if State.unlock_active and method and (method == "InvokeServer" or method == "FireServer") then
-                    if self:IsA("RemoteFunction") or self:IsA("RemoteEvent") then
-                        local name = self.Name:lower()
-                        if name:match("equip") or name:match("inventory") then
-                            if Unlocker.interceptEquip(...) then return true end
-                        end
-                    end
+    -- Hook individual remote metatables for equip interception (per-remote, not global __namecall)
+    State._hooked_remote_mts = State._hooked_remote_mts or {}
+    local function hookRemote(remote)
+        if not remote then return end
+        local className = remote.ClassName
+        local isEvent = className == "RemoteEvent" or className == "UnreliableRemoteEvent"
+        local isFunc = className == "RemoteFunction"
+        if not isEvent and not isFunc then return end
+
+        -- Try hookfunction on FireServer/InvokeServer first
+        if hookfunction then
+            if isEvent and not State._fire_server_hooked then
+                local ok = pcall(function()
+                    local orig = remote.FireServer
+                    hookfunction(remote.FireServer, newcclosure(function(self, ...)
+                        if Unlocker.interceptEquip(...) then return end
+                        return orig(self, ...)
+                    end))
+                end)
+                if ok then State._fire_server_hooked = true; return end
+            elseif isFunc and not State._invoke_server_hooked then
+                local ok = pcall(function()
+                    local orig = remote.InvokeServer
+                    hookfunction(remote.InvokeServer, newcclosure(function(self, ...)
+                        if Unlocker.interceptEquip(...) then return true end
+                        return orig(self, ...)
+                    end))
+                end)
+                if ok then State._invoke_server_hooked = true; return end
+            end
+        end
+
+        -- Fallback: hook metatable __namecall on individual remotes
+        local mt = getrawmetatable(remote)
+        if not mt or State._hooked_remote_mts[mt] then return end
+        State._hooked_remote_mts[mt] = true
+        pcall(setreadonly, mt, false)
+        local origNamecall = mt.__namecall
+        local origIndex = mt.__index
+        if typeof(getnamecallmethod) == "function" then
+            mt.__namecall = newcclosure(function(self, ...)
+                local method = getnamecallmethod()
+                if method ~= "FireServer" and method ~= "InvokeServer" then
+                    return origNamecall(self, ...)
+                end
+                if State.unlock_active then
+                    local args = table.pack(...)
+                    if Unlocker.interceptEquip(table.unpack(args, 1, args.n)) then return true end
                 end
                 return origNamecall(self, ...)
             end)
-        end)
+        end
     end
+
+    -- Hook remotes we can find
+    pcall(function()
+        for _, desc in ipairs(ReplicatedStorage:GetDescendants()) do
+            if desc:IsA("RemoteEvent") or desc:IsA("RemoteFunction") then
+                pcall(hookRemote, desc)
+            end
+        end
+    end)
 
     return true
 end
