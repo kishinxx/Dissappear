@@ -7906,24 +7906,18 @@ local manualSpamToggle = MainTab:CreateToggle({
 
                 if tick() - lastParryTick >= delay then
                     lastParryTick = tick()
+                    if _G.config.animfix then
+                        local elapsed = tick() - spamStartTime
+                        if elapsed < 2 then
+                            if tick() - lastAnimTick >= 1 then
+                                lastAnimTick = tick()
+                                playParryFix()
+                            end
+                        else
+                            playParryFix()
+                        end
+                    end
                     BallHelper.parry()
-                end
-
-                if _G.config.animfix then
-                    local elapsed = tick() - spamStartTime
-                    local rampTime = 3
-                    local animKps
-                    if elapsed < rampTime then
-                        local t = elapsed / rampTime
-                        animKps = 1 + (targetKps - 1) * (t * t * t)
-                    else
-                        animKps = targetKps
-                    end
-                    local animDelay = 1 / animKps
-                    if tick() - lastAnimTick >= animDelay then
-                        lastAnimTick = tick()
-                        playParryFix()
-                    end
                 end
             end)
 
