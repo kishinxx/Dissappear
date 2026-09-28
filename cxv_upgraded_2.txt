@@ -4928,6 +4928,7 @@ end
 
 local ExclusiveTab = Window:CreateTab({ Name = "Exclusive", Icon = "star" })
 
+do -- Exclusive tab scope
 ExclusiveTab:CreateSection("No Cooldown")
 
 ExclusiveTab:CreateToggle({
@@ -5267,6 +5268,7 @@ if loaderFrame then
         end)
     end
 end
+end -- Exclusive tab scope
 
 
 local Connections = {}
@@ -6459,6 +6461,7 @@ MainTab:CreateToggle({
     end
 })
 
+do -- Detections tab scope
 DetectionsTab:CreateSection("Detections")
 
 local antiPhantomActive = false
@@ -6698,6 +6701,7 @@ ReplicatedStorage.Remotes.ParrySuccessAll.OnClientEvent:Connect(function(_, parr
         BallHelper.ball.properties.curving = tick()
     end
 end)
+end -- Detections tab scope
 
 local savedAcc = math.clamp(tonumber(_G.config.accuracy) or 100, 1, 100)
 
@@ -7375,6 +7379,7 @@ MainTab:CreateToggle({
     end
 })
 
+do -- Visual & Settings tab scope
 VisualTab:CreateSection("Visual")
 
 VisualTab:CreateToggle({
@@ -7630,3 +7635,4 @@ applyAccent(themeColor(_G.config.theme_accent, Library.Theme.Accent))
 applyAccentDark(themeColor(_G.config.theme_accent_dark, Library.Theme.AccentDark))
 applyBackground(themeColor(_G.config.theme_background, Library.Theme.Background))
 applyText(themeColor(_G.config.theme_text, Library.Theme.Text))
+end -- Visual & Settings tab scope
