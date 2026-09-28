@@ -1306,7 +1306,7 @@ Unlocker.findSwordsController = function()
         return nil
     end
     for _, conn in ipairs(conns) do
-        local fn = conn.Function or conn.function
+        local fn = conn.Function or conn["function"]
         if fn then
             local isLua = true
             if islclosure then
