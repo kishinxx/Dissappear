@@ -70,6 +70,7 @@ _G.config = {
     custom_announcer = nil,
     announcer_text = nil,
     auto_parry_keybind = nil,
+    auto_parry_notify = nil,
 }
 
 if not isfolder("angeli/configs") then
@@ -6334,8 +6335,12 @@ local autoParryToggle = MainTab:CreateToggle({
     Callback = function(enabled)
         _G.config.auto_parry = enabled
         if enabled then
+            if _G.config.auto_parry_notify then
+                Library:Notify({ Title = "Auto Parry", Content = "On", Duration = 2 })
+            end
             Connections.auto_parry = RunService.PreSimulation:Connect(function()
                 if _G.triggerbot then return end
+                if not isInRound() then return end
                 if not LocalPlayer.Character or not LocalPlayer.Character.PrimaryPart then return end
 
                 local props = BallHelper.ball.properties
@@ -6411,6 +6416,9 @@ local autoParryToggle = MainTab:CreateToggle({
                 end
             end)
         else
+            if _G.config.auto_parry_notify then
+                Library:Notify({ Title = "Auto Parry", Content = "Off", Duration = 2 })
+            end
             if Connections.auto_parry then
                 Connections.auto_parry:Disconnect()
                 Connections.auto_parry = nil
@@ -6429,6 +6437,15 @@ local autoParryKeybind = MainTab:CreateKeybind({
     OnChanged = function(key)
         _G.config.auto_parry_keybind = key.Name
     end,
+})
+
+MainTab:CreateToggle({
+    Name = "Auto Parry Notify",
+    CurrentValue = _G.config.auto_parry_notify or false,
+    Flag = "AutoParryNotify",
+    Callback = function(enabled)
+        _G.config.auto_parry_notify = enabled
+    end
 })
 
 DetectionsTab:CreateSection("Detections")
@@ -6759,7 +6776,13 @@ end)
 
 
 local triggerActive = false
+local function isInRound()
+    local char = LocalPlayer.Character
+    return char and char.Parent == workspace:FindFirstChild("Alive")
+end
+
 local function Trigger(ball)
+    if not isInRound() then return end
     if triggerActive then return end
     triggerActive = true
     BallHelper.parry()
@@ -6978,6 +7001,7 @@ local manualSpamToggle = MainTab:CreateToggle({
             local lastParryTick = 0
 
             Connections.manual_spam = RunService.PreSimulation:Connect(function()
+                if not isInRound() then return end
                 local kps = math.clamp(tonumber(_G.config.manual_spam_kps) or 100, 1, 3000)
                 local delay = 1 / kps
 
