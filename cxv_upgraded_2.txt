@@ -7902,11 +7902,11 @@ local manualSpamToggle = MainTab:CreateToggle({
                 if not isInRound() then return end
                 local targetKps = math.clamp(tonumber(_G.config.manual_spam_kps) or 100, 1, 3000)
                 local elapsed = tick() - spamStartTime
-                local rampTime = 2.5
+                local rampTime = 3
                 local kps
                 if elapsed < rampTime then
                     local t = elapsed / rampTime
-                    kps = 1 + (targetKps - 1) * (t * t)
+                    kps = 1 + (targetKps - 1) * (t * t * t)
                 else
                     kps = targetKps
                 end
