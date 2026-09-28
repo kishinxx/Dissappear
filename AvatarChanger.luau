@@ -73,6 +73,7 @@ local function saveConfig(cfg)
             spoof_displayname = cfg.spoof_displayname or "",
             spoof_avatar_user = cfg.spoof_avatar_user or "",
             unlock_all_enabled = cfg.unlock_all_enabled or false,
+            emote_enabled = cfg.emote_enabled or false,
             equipped_sword = cfg.equipped_sword,
             equipped_explosion = cfg.equipped_explosion,
             toggle_key = cfg.toggle_key and cfg.toggle_key.Name or "RightShift",
@@ -195,6 +196,8 @@ local State = {
     },
     emote_fav_statables = {},
     emote_our_container = nil,
+    emote_statable = nil,
+    emote_inventory_obj = nil,
     inventory_controller = nil,
     avatar_guard_conn = nil,
 }
@@ -1283,21 +1286,18 @@ end
 Unlocker.findSwordsController = function()
     if State.swords_controller then return State.swords_controller end
     if not getconnections then return nil end
-    local ok, remotes = pcall(function()
-        return ReplicatedStorage:FindFirstChild("Remotes") and ReplicatedStorage.Remotes:FindFirstChild("FireSwordInfo")
+    local ok, remote = pcall(function()
+        return ReplicatedStorage:WaitForChild("Remotes", 5) and ReplicatedStorage.Remotes:FindFirstChild("FireSwordInfo")
     end)
-    if not ok or not remotes then return nil end
-    local ok2, conns = pcall(getconnections, remotes.OnClientEvent)
+    if not ok or not remote then return nil end
+    local ok2, conns = pcall(getconnections, remote.OnClientEvent)
     if not ok2 or typeof(conns) ~= "table" then return nil end
     for _, conn in ipairs(conns) do
         if conn.Function and islclosure(conn.Function) then
             local ok3, upvals = pcall(getupvalues, conn.Function)
             if ok3 and typeof(upvals) == "table" and #upvals == 1 and typeof(upvals[1]) == "table" then
-                local tbl = upvals[1]
-                if typeof(tbl.SetSword) == "function" then
-                    State.swords_controller = tbl
-                    return tbl
-                end
+                State.swords_controller = upvals[1]
+                return upvals[1]
             end
         end
     end
@@ -2222,18 +2222,28 @@ Emotes.repaintWheel = function()
 end
 
 Emotes.destroyCustomList = function()
+    if State.emote_inventory_obj then
+        pcall(function() State.emote_inventory_obj:Destroy() end)
+        State.emote_inventory_obj = nil
+    end
     if State.emote_our_container then
         pcall(function() State.emote_our_container:Destroy() end)
         State.emote_our_container = nil
     end
 end
 
-Emotes.getDisplayName = function(emoteName)
-    local catalog = State.item_info and State.item_info.Emote
-    if catalog and typeof(catalog[emoteName]) == "table" then
-        return catalog[emoteName].DisplayName or catalog[emoteName].Name or emoteName
+Emotes.findStatable = function()
+    if State.emote_statable then return State.emote_statable end
+    local shared = ReplicatedStorage:FindFirstChild("Shared")
+    if not shared then return nil end
+    local mod = shared:FindFirstChild("Statable")
+    if not mod then return nil end
+    local ok, result = pcall(require, mod)
+    if ok and typeof(result) == "table" then
+        State.emote_statable = result
+        return result
     end
-    return emoteName
+    return nil
 end
 
 Emotes.buildEmoteList = function()
@@ -2271,6 +2281,11 @@ Emotes.buildEmoteList = function()
     clone.Size = content.Size
     clone.ZIndex = content.ZIndex or 1
 
+    local searchFrame = list:FindFirstChild("SearchFrame")
+    if searchFrame and searchFrame:IsA("GuiObject") and clone.ZIndex >= searchFrame.ZIndex then
+        clone.ZIndex = searchFrame.ZIndex - 1
+    end
+
     local cloneTemplate = nil
     local cloneGrid = clone:FindFirstChildWhichIsA("UIGridLayout")
     if cloneGrid then cloneTemplate = cloneGrid:FindFirstChild("TEMPLATE") end
@@ -2285,6 +2300,56 @@ Emotes.buildEmoteList = function()
     State.emote_our_container = clone
     content.Visible = false
 
+    -- Try using InventoryController:CreateInventory for proper game-native emote list
+    local statable = Emotes.findStatable()
+    local ic = State.inventory_controller
+    if ic and statable and typeof(ic.CreateInventory) == "function" then
+        local useTemplate = cloneTemplate or template
+        local searchState = statable.State("")
+        local sortOpt = statable.State("Default")
+        local sortOrder = statable.State("Most")
+        local useFav = statable.State(true)
+
+        local ok, invObj = pcall(function()
+            return ic:CreateInventory({
+                InventoryType = "Emote",
+                ChangeNameStroke = false,
+                ItemTemplate = useTemplate,
+                Container = clone,
+                SearchFilter = searchState,
+                SortOption = sortOpt,
+                SortOrder = sortOrder,
+                UseFavorites = useFav,
+                OnSlotCreated = function(itemType, item, trove, parent, arg4)
+                    local name = item and item.Name
+                    if not name then return end
+                    if parent:IsA("GuiButton") then
+                        trove:Add(parent.Activated:Connect(function()
+                            if not State.emote_enabled then return end
+                            local slot = Emotes.currentAbsSlot()
+                            State.emote_virtual[slot] = name
+                            persistConfig()
+                            Emotes.repaintWheel()
+                            local ew2 = Emotes.getEmoteWheel()
+                            if ew2 then
+                                local listFrame = ew2:FindFirstChild("List")
+                                if listFrame and listFrame:IsA("GuiObject") then
+                                    listFrame.Visible = false
+                                end
+                            end
+                        end))
+                    end
+                end,
+            })
+        end)
+        if ok and invObj then
+            State.emote_inventory_obj = invObj
+            Emotes.syncListVisibility()
+            return true
+        end
+    end
+
+    -- Fallback: manually build emote list from catalog
     local catalog = State.item_info and State.item_info.Emote
     if typeof(catalog) ~= "table" then return false end
 
@@ -2303,7 +2368,12 @@ Emotes.buildEmoteList = function()
 
         local nameLabel = item:FindFirstChild("ItemName") or item:FindFirstChild("Name") or item:FindFirstChild("TextLabel") or item:FindFirstChildWhichIsA("TextLabel")
         if nameLabel and nameLabel:IsA("TextLabel") then
-            nameLabel.Text = Emotes.getDisplayName(emoteName)
+            local catalog2 = State.item_info and State.item_info.Emote
+            local display = emoteName
+            if catalog2 and typeof(catalog2[emoteName]) == "table" then
+                display = catalog2[emoteName].DisplayName or catalog2[emoteName].Name or emoteName
+            end
+            nameLabel.Text = display
         end
 
         local btn = item
@@ -2339,7 +2409,6 @@ Emotes.buildEmoteList = function()
         count += 1
     end
 
-    -- Sync visibility: show our list when native list shows, hide when it hides
     Emotes.syncListVisibility()
     return count > 0
 end
@@ -2369,7 +2438,7 @@ Emotes.syncListVisibility = function()
     table.insert(State.emote_connections, content:GetPropertyChangedSignal("Visible"):Connect(function()
         if State.emote_enabled and State.emote_our_container and content.Visible then
             content.Visible = false
-            ourList.Visible = true
+            if State.emote_our_container then State.emote_our_container.Visible = true end
         end
     end))
 end
