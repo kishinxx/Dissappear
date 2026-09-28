@@ -7896,26 +7896,34 @@ local manualSpamToggle = MainTab:CreateToggle({
     Callback = function(enabled)
         if enabled then
             local lastParryTick = 0
+            local lastAnimTick = 0
             local spamStartTime = tick()
 
             Connections.manual_spam = RunService.PreSimulation:Connect(function()
                 if not isInRound() then return end
                 local targetKps = math.clamp(tonumber(_G.config.manual_spam_kps) or 100, 1, 3000)
-                local elapsed = tick() - spamStartTime
-                local rampTime = 3
-                local kps
-                if elapsed < rampTime then
-                    local t = elapsed / rampTime
-                    kps = 1 + (targetKps - 1) * (t * t * t)
-                else
-                    kps = targetKps
-                end
-                local delay = 1 / kps
+                local delay = 1 / targetKps
 
                 if tick() - lastParryTick >= delay then
                     lastParryTick = tick()
-                    if _G.config.animfix then playParryFix() end
                     BallHelper.parry()
+                end
+
+                if _G.config.animfix then
+                    local elapsed = tick() - spamStartTime
+                    local rampTime = 3
+                    local animKps
+                    if elapsed < rampTime then
+                        local t = elapsed / rampTime
+                        animKps = 1 + (targetKps - 1) * (t * t * t)
+                    else
+                        animKps = targetKps
+                    end
+                    local animDelay = 1 / animKps
+                    if tick() - lastAnimTick >= animDelay then
+                        lastAnimTick = tick()
+                        playParryFix()
+                    end
                 end
             end)
 
