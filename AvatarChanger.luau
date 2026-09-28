@@ -188,6 +188,7 @@ local State = {
         Emote5 = true, Emote6 = true, Emote7 = true,
     },
     emote_fav_statables = {},
+    emote_our_container = nil,
     inventory_controller = nil,
     avatar_guard_conn = nil,
 }
@@ -1313,6 +1314,21 @@ Unlocker.applySwordModel = function(char, swordName)
     end
 end
 
+Unlocker.setSwordAttributes = function(char, swordName)
+    pcall(function() char:SetAttribute("CurrentlyEquippedSword", swordName) end)
+    pcall(function() localPlayer:SetAttribute("CurrentlyEquippedSword", swordName) end)
+    -- Set slash effect name from sword info
+    local swordsMod = Unlocker.findSwordsModule()
+    if swordsMod and typeof(swordsMod.GetSword) == "function" then
+        pcall(function()
+            local info = swordsMod:GetSword(swordName)
+            if info and info.SlashName then
+                char:SetAttribute("SlashEffect", info.SlashName)
+            end
+        end)
+    end
+end
+
 Unlocker.equipSword = function(name)
     if not State.item_info or not State.item_info.Sword[name] then return end
     local oldName = State.equipped_skins.Sword
@@ -1329,11 +1345,13 @@ Unlocker.equipSword = function(name)
             end
         end
         Unlocker.applySwordModel(char, name)
+        Unlocker.setSwordAttributes(char, name)
         -- Retry after a short delay if model didn't appear
         task.delay(0.25, function()
             local c = localPlayer.Character
             if c and not c:FindFirstChild(name) and State.equipped_skins.Sword == name then
                 Unlocker.applySwordModel(c, name)
+                Unlocker.setSwordAttributes(c, name)
             end
         end)
     end
@@ -1637,7 +1655,10 @@ Unlocker.enable = function()
         task.delay(1, function()
             if State.equipped_skins.Sword == Config.equipped_sword then
                 local char = localPlayer.Character
-                if char then Unlocker.applySwordModel(char, Config.equipped_sword) end
+                if char then
+                    Unlocker.applySwordModel(char, Config.equipped_sword)
+                    Unlocker.setSwordAttributes(char, Config.equipped_sword)
+                end
             end
         end)
     end
@@ -2051,19 +2072,149 @@ Emotes.repaintWheel = function()
     pcall(function() if ctrl.populateEmoteList then ctrl:populateEmoteList() end end)
 end
 
-Emotes.refreshEmoteList = function()
+Emotes.destroyCustomList = function()
+    if State.emote_our_container then
+        pcall(function() State.emote_our_container:Destroy() end)
+        State.emote_our_container = nil
+    end
+end
+
+Emotes.getDisplayName = function(emoteName)
+    local catalog = State.item_info and State.item_info.Emote
+    if catalog and typeof(catalog[emoteName]) == "table" then
+        return catalog[emoteName].DisplayName or catalog[emoteName].Name or emoteName
+    end
+    return emoteName
+end
+
+Emotes.buildEmoteList = function()
+    if State.emote_our_container and State.emote_our_container.Parent then return true end
+    Emotes.destroyCustomList()
+
+    local pg = localPlayer:FindFirstChild("PlayerGui")
+    local ew = pg and pg:FindFirstChild("EmoteWheel")
+    if not ew then return false end
+    local list = ew:FindFirstChild("List")
+    if not list then return false end
+    local content = list:FindFirstChild("Content")
+    if not content or not content:IsA("ScrollingFrame") then return false end
+
+    local gridLayout = content:FindFirstChildWhichIsA("UIGridLayout")
+    local template = nil
+    if gridLayout then template = gridLayout:FindFirstChild("TEMPLATE") end
+    if not template then
+        for _, child in ipairs(content:GetChildren()) do
+            if child.Name == "TEMPLATE" then template = child; break end
+        end
+    end
+    if not template then return false end
+
+    local clone = content:Clone()
+    clone.Name = "CustomEmoteList"
+    for _, child in ipairs(clone:GetChildren()) do
+        if not (child.Name == "TEMPLATE" or child:IsA("UIGridLayout") or child:IsA("UIListLayout")
+            or child:IsA("UIPadding") or child:IsA("UIAspectRatioConstraint")
+            or child:IsA("UIScale") or child:IsA("UICorner") or child:IsA("UIStroke")) then
+            pcall(function() child:Destroy() end)
+        end
+    end
+    clone.Visible = false
+    clone.CanvasPosition = Vector2.new(0, 0)
+    clone.Position = content.Position
+    clone.Size = content.Size
+    clone.ZIndex = content.ZIndex or 1
+
+    local cloneTemplate = nil
+    local cloneGrid = clone:FindFirstChildWhichIsA("UIGridLayout")
+    if cloneGrid then cloneTemplate = cloneGrid:FindFirstChild("TEMPLATE") end
+    if not cloneTemplate then
+        for _, child in ipairs(clone:GetChildren()) do
+            if child.Name == "TEMPLATE" then cloneTemplate = child; break end
+        end
+    end
+    if cloneTemplate then cloneTemplate.Visible = false end
+
+    clone.Parent = list
+    State.emote_our_container = clone
+
+    local catalog = State.item_info and State.item_info.Emote
+    if typeof(catalog) ~= "table" then return false end
+
+    local useTemplate = cloneTemplate or template
+    local count = 0
+    local sorted = {}
+    for emoteName in pairs(catalog) do
+        table.insert(sorted, emoteName)
+    end
+    table.sort(sorted)
+
+    for _, emoteName in ipairs(sorted) do
+        local item = useTemplate:Clone()
+        item.Name = emoteName
+        item.Visible = true
+
+        local nameLabel = item:FindFirstChild("ItemName") or item:FindFirstChild("Name")
+            or item:FindFirstChild("TextLabel") or item:FindFirstChildWhichIsA("TextLabel")
+        if nameLabel and nameLabel:IsA("TextLabel") then
+            nameLabel.Text = Emotes.getDisplayName(emoteName)
+        end
+
+        local btn = item
+        if not (btn:IsA("TextButton") or btn:IsA("ImageButton")) then
+            btn = item:FindFirstChildWhichIsA("GuiButton")
+        end
+        if btn then
+            local conn = btn.Activated:Connect(function()
+                if not State.emote_enabled then return end
+                local slot = Emotes.currentAbsSlot()
+                State.emote_virtual[slot] = emoteName
+                persistConfig()
+                Emotes.repaintWheel()
+                local ew2 = Emotes.getEmoteWheel()
+                if ew2 then
+                    local listFrame = ew2:FindFirstChild("List")
+                    if listFrame and listFrame:IsA("GuiObject") then
+                        listFrame.Visible = false
+                    end
+                end
+            end)
+            table.insert(State.emote_connections, conn)
+        end
+
+        item.Parent = clone
+        count += 1
+    end
+
+    -- Sync visibility: show our list when native list shows, hide when it hides
+    Emotes.syncListVisibility()
+    return count > 0
+end
+
+Emotes.syncListVisibility = function()
     local ew = Emotes.getEmoteWheel()
     if not ew then return end
     local list = ew:FindFirstChild("List")
     if not list then return end
     local content = list:FindFirstChild("Content")
-    if not content or not content:IsA("ScrollingFrame") then return end
-    for _, child in ipairs(content:GetChildren()) do
-        if not (child:IsA("UIGridLayout") or child:IsA("UIListLayout") or child:IsA("UIPadding") or child:IsA("UIAspectRatioConstraint") or child:IsA("UIScale") or child:IsA("UICorner") or child:IsA("UIStroke") or child.Name == "TEMPLATE") then
-            pcall(function() child:Destroy() end)
+    local ourList = State.emote_our_container
+
+    if not content or not ourList then return end
+
+    local function sync()
+        if not State.emote_enabled or not State.emote_our_container then
+            if content then content.Visible = list.Visible end
+            return
         end
+        ourList.Visible = list.Visible
+        content.Visible = false
     end
-    Emotes.repaintWheel()
+
+    sync()
+    table.insert(State.emote_connections, list:GetPropertyChangedSignal("Visible"):Connect(sync))
+end
+
+Emotes.refreshEmoteList = function()
+    Emotes.buildEmoteList()
 end
 
 Emotes.currentAbsSlot = function()
@@ -2169,6 +2320,7 @@ Emotes.enable = function()
         if not pg or State.emote_boot_id ~= bootId then return end
         local ew = pg:WaitForChild("EmoteWheel", 15)
         if not ew or not State.emote_enabled or State.emote_boot_id ~= bootId then return end
+        Emotes.buildEmoteList()
         Emotes.bindWheelSlots()
 
         table.insert(State.emote_connections, ew:GetPropertyChangedSignal("Enabled"):Connect(function()
@@ -2176,6 +2328,7 @@ Emotes.enable = function()
                 task.defer(function()
                     if State.emote_enabled then
                         Emotes.repaintWheel()
+                        Emotes.buildEmoteList()
                         Emotes.bindWheelSlots()
                     end
                 end)
@@ -2206,6 +2359,16 @@ Emotes.disable = function()
         State.emote_loop = nil
     end
     Emotes.stopLocal()
+    Emotes.destroyCustomList()
+    -- Restore native content visibility
+    pcall(function()
+        local ew = Emotes.getEmoteWheel()
+        if ew then
+            local list = ew:FindFirstChild("List")
+            local content = list and list:FindFirstChild("Content")
+            if content then content.Visible = true end
+        end
+    end)
     for _, conn in ipairs(State.emote_connections) do
         pcall(function()
             if typeof(conn) == "function" then conn()
