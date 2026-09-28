@@ -71,6 +71,9 @@ _G.config = {
     auto_parry_notify = nil,
     ability_triggerbot = nil,
     ability_triggerbot_notify = nil,
+    random_accuracy = nil,
+    random_accuracy_min = nil,
+    random_accuracy_max = nil,
 }
 
 if not isfolder("angeli/configs") then
@@ -6367,6 +6370,10 @@ local autoParryToggle = MainTab:CreateToggle({
 
                     if parryActive then return end
 
+                    if _G.config.random_accuracy then
+                        rollRandomAccuracy()
+                    end
+
                     local ballTarget = ball:GetAttribute("target")
                     local realBallTarget = realBall:GetAttribute("target")
                     local velocity = zoomies.VectorVelocity
@@ -6694,7 +6701,20 @@ end)
 
 local savedAcc = math.clamp(tonumber(_G.config.accuracy) or 100, 1, 100)
 
-MainTab:CreateSlider({
+local function applyAccuracy(value)
+    SpeedDivisorMultiplier = 0.55 + (value - 1) * 0.005050505050505
+end
+
+local function rollRandomAccuracy()
+    local lo = math.clamp(tonumber(_G.config.random_accuracy_min) or 25, 1, 100)
+    local hi = math.clamp(tonumber(_G.config.random_accuracy_max) or 65, 1, 100)
+    if lo > hi then lo, hi = hi, lo end
+    if lo == hi then hi = math.min(hi + 1, 100) end
+    local rolled = math.random(lo, hi)
+    applyAccuracy(rolled)
+end
+
+local accuracySlider = MainTab:CreateSlider({
     Name = "Parry Accuracy",
     Range = { 1, 100 },
     Increment = 1,
@@ -6702,11 +6722,65 @@ MainTab:CreateSlider({
     Flag = "Accuracy",
     Callback = function(value)
         task.spawn(function()
-            SpeedDivisorMultiplier = 0.55 + (value - 1) * 0.005050505050505
             _G.config.accuracy = math.floor(value)
+            if not _G.config.random_accuracy then
+                applyAccuracy(value)
+            end
         end)
     end
 })
+
+local randomAccMin = nil
+local randomAccMax = nil
+
+local randomAccToggle = MainTab:CreateToggle({
+    Name = "Random Accuracy",
+    CurrentValue = _G.config.random_accuracy or false,
+    Flag = "RandomAccuracy",
+    Callback = function(enabled)
+        _G.config.random_accuracy = enabled
+        if randomAccMin then randomAccMin._frame.Visible = enabled end
+        if randomAccMax then randomAccMax._frame.Visible = enabled end
+        if not enabled then
+            applyAccuracy(tonumber(_G.config.accuracy) or 100)
+        end
+    end
+})
+
+randomAccMin = MainTab:CreateSlider({
+    Name = "Min Accuracy",
+    Range = { 1, 100 },
+    Increment = 1,
+    CurrentValue = math.clamp(tonumber(_G.config.random_accuracy_min) or 25, 1, 100),
+    Flag = "RandomAccMin",
+    Callback = function(value)
+        _G.config.random_accuracy_min = math.floor(value)
+        local hi = tonumber(_G.config.random_accuracy_max) or 65
+        if value >= hi then
+            local newHi = math.min(value + 1, 100)
+            if randomAccMax then randomAccMax:Set(newHi) end
+        end
+    end
+})
+
+randomAccMax = MainTab:CreateSlider({
+    Name = "Max Accuracy",
+    Range = { 1, 100 },
+    Increment = 1,
+    CurrentValue = math.clamp(tonumber(_G.config.random_accuracy_max) or 65, 1, 100),
+    Flag = "RandomAccMax",
+    Callback = function(value)
+        _G.config.random_accuracy_max = math.floor(value)
+        local lo = tonumber(_G.config.random_accuracy_min) or 25
+        if value <= lo then
+            local newLo = math.max(value - 1, 1)
+            if randomAccMin then randomAccMin:Set(newLo) end
+        end
+    end
+})
+
+randomAccMin._frame.Visible = _G.config.random_accuracy or false
+randomAccMax._frame.Visible = _G.config.random_accuracy or false
 
 local CurveMethodDropdown = MainTab:CreateDropdown({
     Name = "Curve Method",
