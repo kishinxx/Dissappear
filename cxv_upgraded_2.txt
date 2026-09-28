@@ -6644,6 +6644,46 @@ AvatarChanger.clean = function(char)
     for _, t in ipairs(tools) do if t and t.Parent == nil then t.Parent = bp or char end end
 end
 
+AvatarChanger.applySpecial = function(char, desc)
+    if not char or not desc then return end
+    if desc.Head and (desc.Head == 15093053680 or desc.Head == 134082513) then
+        pcall(function()
+            local head = char:FindFirstChild("Head")
+            if head then
+                head.Transparency = 1
+                local d = head:FindFirstChildOfClass("Decal")
+                if d then d:Destroy() end
+            end
+        end)
+    end
+    if desc.RightLeg and desc.RightLeg == 139607718 then
+        pcall(function()
+            local rl = char:FindFirstChild("RightLeg") or char:FindFirstChild("Right Leg")
+            if rl then
+                for _, c in ipairs(rl:GetChildren()) do
+                    if c:IsA("SpecialMesh") or c:IsA("Mesh") then c:Destroy() end
+                end
+                local m = Instance.new("SpecialMesh")
+                m.MeshId = "rbxassetid://101851696"
+                m.TextureId = "rbxassetid://115727863"
+                m.Scale = Vector3.new(1, 1, 1)
+                m.Parent = rl
+                return
+            end
+            for _, n in ipairs({"RightUpperLeg","RightLowerLeg","RightFoot"}) do
+                local p = char:FindFirstChild(n)
+                if p then p.Transparency = 1 end
+            end
+            local rul = char:FindFirstChild("RightUpperLeg")
+            if rul and not rul:FindFirstChild("KorbloxLeg") then
+                local pt = Instance.new("Part"); pt.Name="KorbloxLeg"; pt.CanCollide=false; pt.Massless=true; pt.Size=Vector3.new(1,2,1)
+                local sm = Instance.new("SpecialMesh"); sm.MeshId="rbxassetid://101851696"; sm.TextureId="rbxassetid://115727863"; sm.Scale=Vector3.new(1,1,1); sm.Parent=pt
+                local w = Instance.new("Weld"); w.Part0=rul; w.Part1=pt; w.C0=CFrame.new(0,-0.5,0); w.Parent=pt; pt.Parent=rul
+            end
+        end)
+    end
+end
+
 AvatarChanger.transferAppearance = function(temp, char, hum, desc)
     if not temp or not char or not hum then return false end
     pcall(function() if hum.ApplyDescriptionClientServer then hum:ApplyDescriptionClientServer(desc) else hum:ApplyDescription(desc) end end)
@@ -6662,6 +6702,7 @@ AvatarChanger.transferAppearance = function(temp, char, hum, desc)
         local f = sh:FindFirstChild("face") or sh:FindFirstChildOfClass("Decal")
         if f then local f2 = dh:FindFirstChild("face") or dh:FindFirstChildOfClass("Decal"); if f2 then f2:Destroy() end; local cl = f:Clone(); cl.Name="face"; cl.Parent=dh end
     end
+    AvatarChanger.applySpecial(char, desc)
     AvatarChanger.applyAccessories(char, hum, temp, desc)
     return true
 end
@@ -6711,7 +6752,11 @@ AvatarChanger.applyDesc = function(desc, uid, isRevert)
             if not ok then
                 pcall(function() if hum.ApplyDescriptionClientServer then hum:ApplyDescriptionClientServer(desc) else hum:ApplyDescription(desc) end end)
                 AvatarChanger.applyBodyScales(hum, desc)
+                AvatarChanger.applySpecial(char, desc)
                 AvatarChanger.applyAccessories(char, hum, nil, desc)
+            end
+            if not isRevert and _G.config.player_cosmetics then
+                pcall(applyCosmetics, char)
             end
             if not isRevert then
                 local applied = {}
