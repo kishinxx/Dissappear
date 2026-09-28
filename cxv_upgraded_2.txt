@@ -74,6 +74,9 @@ _G.config = {
     random_accuracy = nil,
     random_accuracy_min = nil,
     random_accuracy_max = nil,
+    triggerbot_mode = nil,
+    ability_triggerbot_mode = nil,
+    manual_spam_mode = nil,
 }
 
 if not isfolder("angeli/configs") then
@@ -5806,7 +5809,7 @@ local function calcSpeedDivisorBase(speed)
     return 2.2 + 0.9 * math.log(1 + speed / 80)
 end
 
-local SpeedDivisorMultiplier = 0.55 + (math.clamp(tonumber(_G.config.accuracy) or 100, 1, 100) - 1) * 0.005050505050505
+local SpeedDivisorMultiplier = 0.55 + (math.clamp(tonumber(_G.config.accuracy) or 100, 1, 100) - 1) * 0.008080808080808
 
 local Det = {
     Infinity_Active = false,
@@ -6342,7 +6345,7 @@ local function isInRound()
 end
 
 local function applyAccuracy(value)
-    SpeedDivisorMultiplier = 0.55 + (value - 1) * 0.005050505050505
+    SpeedDivisorMultiplier = 0.55 + (value - 1) * 0.008080808080808
 end
 
 local function rollRandomAccuracy()
@@ -6905,6 +6908,50 @@ local function attachKeybind(toggleEl, keybindEl)
     end)
 end
 
+local function attachModeChip(toggleEl, configKey)
+    pcall(function()
+        local toggleFrame = toggleEl._frame
+        if not toggleFrame then return end
+        local modes = { "Hold", "Toggle" }
+        local current = (_G.config[configKey] == "Toggle") and 2 or 1
+        local chip = Instance.new("TextButton")
+        chip.Name = "ModeChip"
+        chip.AnchorPoint = Vector2.new(1, 0.5)
+        chip.Position = UDim2.new(1, -120, 0.5, 0)
+        chip.Size = UDim2.fromOffset(50, 22)
+        chip.BackgroundColor3 = Library.Theme.Surface
+        chip.BorderSizePixel = 0
+        chip.Text = ""
+        chip.AutoButtonColor = false
+        chip.ZIndex = 5
+        chip.Parent = toggleFrame
+        local cr = Instance.new("UICorner")
+        cr.CornerRadius = UDim.new(0, 6)
+        cr.Parent = chip
+        local st = Instance.new("UIStroke")
+        st.Color = Library.Theme.Stroke
+        st.Thickness = 1
+        st.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+        st.Parent = chip
+        local lbl = Instance.new("TextLabel")
+        lbl.Size = UDim2.fromScale(1, 1)
+        lbl.BackgroundTransparency = 1
+        lbl.Text = modes[current]
+        lbl.TextColor3 = Library.Theme.Muted
+        lbl.TextSize = 11
+        lbl.FontFace = Library.Fonts.Medium
+        lbl.TextXAlignment = Enum.TextXAlignment.Center
+        lbl.Parent = chip
+        _G.config[configKey] = modes[current]
+        chip.MouseButton1Click:Connect(function()
+            current = current % #modes + 1
+            lbl.Text = modes[current]
+            _G.config[configKey] = modes[current]
+        end)
+    end)
+    return configKey
+end
+
 attachKeybind(autoParryToggle, autoParryKeybind)
 
 local manualMobileBtn = nil
@@ -6939,14 +6986,30 @@ local triggerbotToggle = MainTab:CreateToggle({
         end
     end
 })
+local triggerbotHold = false
 local triggerbotKey = MainTab:CreateKeybind({
     Name = "Triggerbot Key",
     CurrentKeybind = "T",
     Flag = "TriggerbotKey",
     Callback = function()
-        triggerbotToggle:Set(not triggerbotToggle:Get())
+        local mode = _G.config.triggerbot_mode or "Hold"
+        if mode == "Hold" then
+            triggerbotHold = true
+            if not triggerbotToggle:Get() then triggerbotToggle:Set(true) end
+        else
+            triggerbotToggle:Set(not triggerbotToggle:Get())
+        end
     end,
 })
+UserInputService.InputEnded:Connect(function(input)
+    if not triggerbotHold then return end
+    if input.UserInputType ~= Enum.UserInputType.Keyboard then return end
+    if triggerbotKey.Value and input.KeyCode == triggerbotKey.Value then
+        triggerbotHold = false
+        if triggerbotToggle:Get() then triggerbotToggle:Set(false) end
+    end
+end)
+attachModeChip(triggerbotToggle, "triggerbot_mode")
 attachKeybind(triggerbotToggle, triggerbotKey)
 
 MainTab:CreateToggle({
@@ -7020,17 +7083,33 @@ local abilityTriggerbotToggle = MainTab:CreateToggle({
     end
 })
 
+local abilityTbHold = false
 local abilityTriggerbotKey = MainTab:CreateKeybind({
     Name = "Ability Triggerbot Key",
     CurrentKeybind = _G.config.ability_triggerbot or "Y",
     Flag = "AbilityTriggerbotKey",
     Callback = function()
-        abilityTriggerbotToggle:Set(not abilityTriggerbotToggle:Get())
+        local mode = _G.config.ability_triggerbot_mode or "Hold"
+        if mode == "Hold" then
+            abilityTbHold = true
+            if not abilityTriggerbotToggle:Get() then abilityTriggerbotToggle:Set(true) end
+        else
+            abilityTriggerbotToggle:Set(not abilityTriggerbotToggle:Get())
+        end
     end,
     OnChanged = function(key)
         _G.config.ability_triggerbot = key.Name
     end,
 })
+UserInputService.InputEnded:Connect(function(input)
+    if not abilityTbHold then return end
+    if input.UserInputType ~= Enum.UserInputType.Keyboard then return end
+    if abilityTriggerbotKey.Value and input.KeyCode == abilityTriggerbotKey.Value then
+        abilityTbHold = false
+        if abilityTriggerbotToggle:Get() then abilityTriggerbotToggle:Set(false) end
+    end
+end)
+attachModeChip(abilityTriggerbotToggle, "ability_triggerbot_mode")
 attachKeybind(abilityTriggerbotToggle, abilityTriggerbotKey)
 
 MainTab:CreateToggle({
@@ -7134,13 +7213,6 @@ MainTab:CreateSlider({
     end
 })
 
-UserInputService.InputBegan:Connect(function(input, gameProcessed)
-    if gameProcessed then return end
-    if input.KeyCode == Enum.KeyCode.E then
-        _G.manual_spam = not _G.manual_spam
-    end
-end)
-
 local manualSpamToggle = MainTab:CreateToggle({
     Name = "Manual Spam",
     CurrentValue = false,
@@ -7197,17 +7269,33 @@ MainTab:CreateToggle({
     end
 })
 
+local manualSpamHold = false
 local manualSpamKeybind = MainTab:CreateKeybind({
     Name = "Manual Spam Key",
     CurrentKeybind = _G.config.manual_spam or "E",
     Flag = "ManualSpamKey",
     Callback = function()
-        manualSpamToggle:Set(not manualSpamToggle:Get())
+        local mode = _G.config.manual_spam_mode or "Hold"
+        if mode == "Hold" then
+            manualSpamHold = true
+            if not manualSpamToggle:Get() then manualSpamToggle:Set(true) end
+        else
+            manualSpamToggle:Set(not manualSpamToggle:Get())
+        end
     end,
     OnChanged = function(Key)
         _G.config.manual_spam = Key.Name
     end,
 })
+UserInputService.InputEnded:Connect(function(input)
+    if not manualSpamHold then return end
+    if input.UserInputType ~= Enum.UserInputType.Keyboard then return end
+    if manualSpamKeybind.Value and input.KeyCode == manualSpamKeybind.Value then
+        manualSpamHold = false
+        if manualSpamToggle:Get() then manualSpamToggle:Set(false) end
+    end
+end)
+attachModeChip(manualSpamToggle, "manual_spam_mode")
 attachKeybind(manualSpamToggle, manualSpamKeybind)
 
 MainTab:CreateSlider({
