@@ -75,7 +75,9 @@ _G.config = {
     random_accuracy_min = nil,
     random_accuracy_max = nil,
     triggerbot_mode = nil,
+    triggerbot_ms = nil,
     ability_triggerbot_mode = nil,
+    ability_triggerbot_ms = nil,
     manual_spam_mode = nil,
 }
 
@@ -6874,6 +6876,8 @@ local function Trigger(ball)
     if not isInRound() then return end
     if triggerActive then return end
     triggerActive = true
+    local ms = tonumber(_G.config.triggerbot_ms) or 0
+    if ms > 0 then task.wait(ms / 1000) end
     BallHelper.parry()
 
     ball:GetAttributeChangedSignal("target"):Once(function()
@@ -7012,6 +7016,18 @@ end)
 attachModeChip(triggerbotToggle, "triggerbot_mode")
 attachKeybind(triggerbotToggle, triggerbotKey)
 
+MainTab:CreateSlider({
+    Name = "Triggerbot MS",
+    Range = { 0, 500 },
+    Increment = 5,
+    CurrentValue = tonumber(_G.config.triggerbot_ms) or 0,
+    Suffix = "ms",
+    Flag = "TriggerbotMS",
+    Callback = function(value)
+        _G.config.triggerbot_ms = math.floor(value)
+    end
+})
+
 MainTab:CreateToggle({
     Name = "Triggerbot Notify",
     CurrentValue = _G.config.triggerbot_notify or false,
@@ -7053,6 +7069,8 @@ local abilityTriggerbotToggle = MainTab:CreateToggle({
                 if ball:GetAttribute("target") ~= LocalPlayer.Name then return end
 
                 abilityTriggerActive = true
+                local ms = tonumber(_G.config.ability_triggerbot_ms) or 0
+                if ms > 0 then task.wait(ms / 1000) end
                 pcall(function()
                     keypress(0x51)
                     task.wait(0.03)
@@ -7111,6 +7129,18 @@ UserInputService.InputEnded:Connect(function(input)
 end)
 attachModeChip(abilityTriggerbotToggle, "ability_triggerbot_mode")
 attachKeybind(abilityTriggerbotToggle, abilityTriggerbotKey)
+
+MainTab:CreateSlider({
+    Name = "Ability TB MS",
+    Range = { 0, 500 },
+    Increment = 5,
+    CurrentValue = tonumber(_G.config.ability_triggerbot_ms) or 0,
+    Suffix = "ms",
+    Flag = "AbilityTriggerbotMS",
+    Callback = function(value)
+        _G.config.ability_triggerbot_ms = math.floor(value)
+    end
+})
 
 MainTab:CreateToggle({
     Name = "Ability Triggerbot Notify",
