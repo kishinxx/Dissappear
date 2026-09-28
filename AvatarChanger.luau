@@ -6,8 +6,9 @@
     - Avatar Changer: Copy any player's full appearance
     - Headless / Korblox toggles
     - Name Spoofer: Fake username + display name everywhere (including CoreGui/Tab/ESC)
-    - Unlock All: All swords + explosions unlocked in shop, equippable
+    - Unlock All: All swords + explosions unlocked in shop, equippable, deleteable
     - Customizable UI toggle keybind
+    - Config persistence (saves/loads between executions)
 
     All client-side — only you see the changes.
     Requires an executor with CoreGui + hookfunction access.
@@ -24,7 +25,7 @@ local TextChatService = game:GetService("TextChatService")
 local InsertService = game:GetService("InsertService")
 local UserInputService = game:GetService("UserInputService")
 local TweenService = game:GetService("TweenService")
-local Workspace = game:GetService("Workspace")
+local HttpService = game:GetService("HttpService")
 
 local localPlayer = Players.LocalPlayer
 local playerGui = localPlayer:WaitForChild("PlayerGui")
@@ -40,31 +41,73 @@ end
 local hookfunction = hookfunction or hookfunc or replaceclosure or detour_function
 local getgenv = getgenv or function() return _G end
 local env = getgenv()
+local writefile = writefile or function() end
+local readfile = readfile or function() return nil end
+local isfile = isfile or function() return false end
+local getrawmetatable = getrawmetatable or debug.getmetatable or getmetatable
+local setreadonly = setreadonly or function() end
+
+------------------------------------------------------------------------
+-- CONFIG PERSISTENCE
+------------------------------------------------------------------------
+local CONFIG_FILE = "AvatarChanger_Config.json"
+
+local function saveConfig(cfg)
+    pcall(function()
+        local data = {
+            avatar_target = cfg.avatar_target or "",
+            avatar_enabled = cfg.avatar_enabled or false,
+            headless_enabled = cfg.headless_enabled or false,
+            korblox_enabled = cfg.korblox_enabled or false,
+            spoofer_enabled = cfg.spoofer_enabled or false,
+            spoof_username = cfg.spoof_username or "",
+            spoof_displayname = cfg.spoof_displayname or "",
+            spoof_avatar_user = cfg.spoof_avatar_user or "",
+            unlock_all_enabled = cfg.unlock_all_enabled or false,
+            equipped_sword = cfg.equipped_sword,
+            equipped_explosion = cfg.equipped_explosion,
+            toggle_key = cfg.toggle_key and cfg.toggle_key.Name or "RightShift",
+        }
+        writefile(CONFIG_FILE, HttpService:JSONEncode(data))
+    end)
+end
+
+local function loadConfig()
+    local ok, data = pcall(function()
+        if not isfile(CONFIG_FILE) then return nil end
+        return HttpService:JSONDecode(readfile(CONFIG_FILE))
+    end)
+    if ok and typeof(data) == "table" then return data end
+    return nil
+end
 
 ------------------------------------------------------------------------
 -- CONFIG
 ------------------------------------------------------------------------
+local saved = loadConfig()
+
 local Config = {
-    -- Avatar
-    avatar_enabled = false,
-    avatar_target = "",
-    headless_enabled = false,
-    korblox_enabled = false,
-
-    -- Name Spoofer
-    spoofer_enabled = false,
-    spoof_username = "",
-    spoof_displayname = "",
-    spoof_avatar_user = "",
-
-    -- Unlock All
-    unlock_all_enabled = false,
-    equipped_sword = nil,
-    equipped_explosion = nil,
-
-    -- UI
+    avatar_enabled = saved and saved.avatar_enabled or false,
+    avatar_target = saved and saved.avatar_target or "",
+    headless_enabled = saved and saved.headless_enabled or false,
+    korblox_enabled = saved and saved.korblox_enabled or false,
+    spoofer_enabled = saved and saved.spoofer_enabled or false,
+    spoof_username = saved and saved.spoof_username or "",
+    spoof_displayname = saved and saved.spoof_displayname or "",
+    spoof_avatar_user = saved and saved.spoof_avatar_user or "",
+    unlock_all_enabled = saved and saved.unlock_all_enabled or false,
+    equipped_sword = saved and saved.equipped_sword or nil,
+    equipped_explosion = saved and saved.equipped_explosion or nil,
     toggle_key = Enum.KeyCode.RightShift,
 }
+
+if saved and saved.toggle_key then
+    pcall(function() Config.toggle_key = Enum.KeyCode[saved.toggle_key] end)
+end
+
+local function persistConfig()
+    task.defer(saveConfig, Config)
+end
 
 ------------------------------------------------------------------------
 -- STATE
@@ -72,8 +115,6 @@ local Config = {
 local State = {
     connections = {},
     spoofer_connections = {},
-    headless_conn = nil,
-    korblox_conn = nil,
 
     -- Avatar
     avatar_applying = false,
@@ -90,9 +131,11 @@ local State = {
     inventory_shared = nil,
     inventory_client = nil,
     original_funcs = {},
-    virtual_items_cache = {},
+    shop_controller = nil,
     shop_spoofed = false,
-    equipped = { Sword = nil, Explosion = nil },
+    refresh_running = false,
+    refresh_dirty = false,
+    equipped_skins = { Sword = nil, Explosion = nil },
     equip_callbacks = { Sword = {}, Explosion = {} },
     inv_change_callbacks = { Sword = {}, Explosion = {} },
     merged_cache = { Sword = nil, Explosion = nil },
@@ -100,6 +143,9 @@ local State = {
     owned_cache = { Sword = nil, Explosion = nil },
     keys_cache = { Sword = nil, Explosion = nil },
     static_fakes = { Sword = {}, Explosion = {}, _built = {} },
+    hidden_items = { Sword = {}, Explosion = {} },
+    fake_slots = { Sword = {}, Explosion = {} },
+    last_equipped_slot = { Sword = nil, Explosion = nil },
 }
 
 local function addConn(conn)
@@ -111,10 +157,6 @@ local function cleanupAll()
     State.connections = {}
     for _, c in ipairs(State.spoofer_connections) do pcall(function() c:Disconnect() end) end
     State.spoofer_connections = {}
-    if State.headless_conn then pcall(function() State.headless_conn:Disconnect() end); State.headless_conn = nil end
-    if State.korblox_conn then pcall(function() State.korblox_conn:Disconnect() end); State.korblox_conn = nil end
-
-    -- Restore hooked inventory functions
     if State.inventory_shared and State.original_funcs then
         for k, v in pairs(State.original_funcs) do
             pcall(function() State.inventory_shared[k] = v end)
@@ -160,12 +202,10 @@ local function removeHeadless(char)
 end
 
 local function setHeadless(on)
-    Config.headless_enabled = on
-    if State.headless_conn then State.headless_conn:Disconnect(); State.headless_conn = nil end
+    Config.headless_enabled = on; persistConfig()
     local char = localPlayer.Character
     if on then
         if char then applyHeadless(char) end
-        State.headless_conn = localPlayer.CharacterAdded:Connect(function(c) task.wait(0.1); if Config.headless_enabled then applyHeadless(c) end end)
     else
         if char then removeHeadless(char) end
     end
@@ -196,12 +236,10 @@ local function removeKorblox(char)
 end
 
 local function setKorblox(on)
-    Config.korblox_enabled = on
-    if State.korblox_conn then State.korblox_conn:Disconnect(); State.korblox_conn = nil end
+    Config.korblox_enabled = on; persistConfig()
     local char = localPlayer.Character
     if on then
         if char then applyKorblox(char) end
-        State.korblox_conn = localPlayer.CharacterAdded:Connect(function(c) task.wait(0.1); if Config.korblox_enabled then applyKorblox(c) end end)
     else
         if char then removeKorblox(char) end
     end
@@ -566,7 +604,6 @@ Avatar.restore = function()
 end
 
 Avatar.reapplyOnSpawn = function(char)
-    if not (Config.avatar_enabled and Config.avatar_target ~= "") then return end
     if not char then return end
     State.avatar_respawn_token += 1; local tk = State.avatar_respawn_token
     task.spawn(function()
@@ -578,9 +615,15 @@ Avatar.reapplyOnSpawn = function(char)
             local t=0; while not done and t<6 do task.wait(0.1); t+=0.1; pcall(function() if localPlayer:HasAppearanceLoaded() then done=true end end) end
             if cn then cn:Disconnect() end
         end
-        if State.avatar_respawn_token ~= tk or not Config.avatar_enabled then return end
-        State.avatar_applying = false; State.avatar_applied_id = nil
-        Avatar.apply(Config.avatar_target)
+        if State.avatar_respawn_token ~= tk then return end
+        -- Reapply avatar if enabled
+        if Config.avatar_enabled and Config.avatar_target ~= "" then
+            State.avatar_applying = false; State.avatar_applied_id = nil
+            Avatar.apply(Config.avatar_target)
+        end
+        -- Reapply headless/korblox
+        if Config.headless_enabled then task.delay(0.2, function() if Config.headless_enabled then applyHeadless(char) end end) end
+        if Config.korblox_enabled then task.delay(0.2, function() if Config.korblox_enabled then applyKorblox(char) end end) end
     end)
 end
 
@@ -666,48 +709,29 @@ end
 ------------------------------------------------------------------------
 local Unlocker = {}
 
-Unlocker.loadModules = function()
-    if State.item_info and State.inventory_shared then return true end
-
-    local ok1, itemInfo = pcall(function() return require(ReplicatedStorage.Shared.ItemInfo) end)
-    if not ok1 or typeof(itemInfo) ~= "table" then return false end
-    State.item_info = itemInfo
-
-    local ok2, inv = pcall(function() return require(ReplicatedStorage.Shared.Inventory) end)
-    if not ok2 or typeof(inv) ~= "table" then return false end
-
-    local ok3, shared = pcall(function() return require(ReplicatedStorage.Shared.Inventory.Shared) end)
-    if not ok3 or typeof(shared) ~= "table" then shared = inv.Shared end
-    if typeof(shared) ~= "table" then return false end
-    State.inventory_shared = shared
-
-    local ok4, client = pcall(function() return inv.Client end)
-    if ok4 and typeof(client) == "table" then State.inventory_client = client end
-
-    return true
-end
+local ITEM_TYPES = { Sword = true, Explosion = true }
 
 Unlocker.fakeItem = function(itemType, name)
     return { Id = name, Name = name }
 end
 
-Unlocker.getOwnedSet = function(itemType)
-    if State.owned_cache[itemType] then return State.owned_cache[itemType] end
-    local set = {}
-    local orig = State.original_funcs.Get or State.inventory_shared.Get
-    local items = orig(State.inventory_shared, nil, itemType)
-    if typeof(items) == "table" then
-        for _, item in pairs(items) do
-            if typeof(item) == "table" and item.Name then set[item.Name] = true end
+Unlocker.isReallyOwned = function(itemType, name)
+    if not name then return false end
+    if not State.owned_cache[itemType] then
+        State.owned_cache[itemType] = {}
+        local orig = State.original_funcs.Get
+        if orig then
+            local items = orig(State.inventory_shared, nil, itemType)
+            if typeof(items) == "table" then
+                for _, item in pairs(items) do
+                    if typeof(item) == "table" and item.Name then
+                        State.owned_cache[itemType][item.Name] = true
+                    end
+                end
+            end
         end
     end
-    State.owned_cache[itemType] = set
-    return set
-end
-
-Unlocker.isOwned = function(itemType, name)
-    if not name then return false end
-    return Unlocker.getOwnedSet(itemType)[name] == true
+    return State.owned_cache[itemType][name] == true
 end
 
 Unlocker.getKeys = function(itemType)
@@ -734,13 +758,356 @@ Unlocker.ensureStaticFakes = function(itemType)
     State.static_fakes._built[itemType] = true
 end
 
+Unlocker.augmentSwordItem = function(itemType, name, item)
+    if itemType ~= "Sword" or typeof(item) ~= "table" then return end
+    local info = State.item_info.Sword[name]
+    if not info then return end
+    if info.HasFinisher then item.Finisher = true end
+    if info.AccessoryToggleable then item.Accessory = true end
+    if item.Kills == nil then item.Kills = 0 end
+end
+
+-- Hook observable .Set/.Get on virtual item properties (OwnsItem, ForceHide, Section)
+Unlocker.hookVirtualItem = function(vItem, key, itemType)
+    if typeof(vItem) ~= "table" then return end
+    local name = vItem.Name or key
+
+    -- Hook OwnsItem
+    if typeof(vItem.OwnsItem) == "table" and typeof(vItem.OwnsItem.Set) == "function" and not vItem.OwnsItem.__hooked then
+        local origSet = vItem.OwnsItem.Set
+        vItem.OwnsItem.__hooked = true
+        vItem.OwnsItem.Set = function(self, val)
+            if State.unlock_active and not State.hidden_items[itemType][name] then
+                return origSet(self, true)
+            end
+            return origSet(self, val)
+        end
+        if typeof(vItem.OwnsItem.Get) == "function" then
+            local origGet = vItem.OwnsItem.Get
+            vItem.OwnsItem.Get = function(self, ...)
+                if State.unlock_active and not State.hidden_items[itemType][name] then
+                    return true
+                end
+                return origGet(self, ...)
+            end
+        end
+    end
+
+    -- Hook ForceHide
+    if typeof(vItem.ForceHide) == "table" and typeof(vItem.ForceHide.Set) == "function" and not vItem.ForceHide.__hooked then
+        local origSet = vItem.ForceHide.Set
+        vItem.ForceHide.__hooked = true
+        local function shouldShow()
+            if not State.unlock_active then return false end
+            if Unlocker.isReallyOwned(itemType, name) then return false end
+            if vItem.InventoryKey ~= nil then return false end
+            if State.hidden_items[itemType][name] then return false end
+            return true
+        end
+        vItem.ForceHide.Set = function(self, val)
+            if shouldShow() then return origSet(self, false) end
+            return origSet(self, val)
+        end
+        if typeof(vItem.ForceHide.Get) == "function" then
+            local origGet = vItem.ForceHide.Get
+            vItem.ForceHide.Get = function(self, ...)
+                if shouldShow() then return false end
+                return origGet(self, ...)
+            end
+        end
+    end
+
+    -- Hook Section
+    if typeof(vItem.Section) == "table" and typeof(vItem.Section.Set) == "function" and not vItem.Section.__hooked then
+        local origSet = vItem.Section.Set
+        vItem.Section.__hooked = true
+        vItem.Section.Set = function(self, val)
+            if State.unlock_active and not Unlocker.isReallyOwned(itemType, name) and not State.hidden_items[itemType][name] then
+                return origSet(self, "Owned")
+            end
+            return origSet(self, val)
+        end
+    end
+end
+
+-- Apply unlock state to a single virtual item
+Unlocker.applyUnlockState = function(vItem, key, itemType)
+    if typeof(vItem) ~= "table" then return end
+    local name = vItem.Name or key
+    local isHidden = State.hidden_items[itemType][name]
+
+    if State.unlock_active and not isHidden and not Unlocker.isReallyOwned(itemType, name) then
+        vItem.NonPurchaseable = true
+        if typeof(vItem.Section) == "string" then vItem.Section = "Owned" end
+    end
+
+    if State.unlock_active and vItem.__unlockApplied and not State.refresh_dirty then return end
+
+    -- Set OwnsItem
+    if typeof(vItem.OwnsItem) == "table" and typeof(vItem.OwnsItem.Set) == "function" then
+        local shouldOwn = not isHidden
+        pcall(function()
+            if typeof(vItem.OwnsItem.Get) == "function" and vItem.OwnsItem:Get() ~= shouldOwn then
+                vItem.OwnsItem:Set(shouldOwn)
+            end
+        end)
+    end
+
+    -- Set ForceHide
+    if typeof(vItem.ForceHide) == "table" and typeof(vItem.ForceHide.Set) == "function" then
+        local shouldHide = isHidden or Unlocker.isReallyOwned(itemType, name)
+        if not shouldHide and not isHidden and vItem.InventoryKey == nil then
+            pcall(function()
+                if typeof(vItem.ForceHide.Get) == "function" and vItem.ForceHide:Get() ~= false then
+                    vItem.ForceHide:Set(false)
+                end
+            end)
+        end
+    end
+
+    -- Set Section
+    if not isHidden and typeof(vItem.Section) == "table" and typeof(vItem.Section.Set) == "function" then
+        local equippedName = State.equipped_skins[itemType]
+        local isEquipped = equippedName and (key == equippedName or name == equippedName or vItem.Id == equippedName)
+        local section = isEquipped and "Equipped" or "Owned"
+        if vItem.__unlockSection ~= section then
+            pcall(vItem.Section.Set, vItem.Section, section)
+            vItem.__unlockSection = section
+        end
+    end
+
+    if State.unlock_active and not isHidden then
+        vItem.__unlockApplied = true
+    end
+end
+
+-- Hook __newindex on virtual items table so new items get hooked automatically
+Unlocker.hookVirtualItemsTable = function(tbl, itemType)
+    local mt = getrawmetatable(tbl) or {}
+    local oldNewindex = mt.__newindex
+
+    mt.__newindex = function(t, k, v)
+        if typeof(v) == "table" then
+            pcall(Unlocker.hookVirtualItem, v, k, itemType)
+            if State.unlock_active and State.shop_spoofed then
+                task.defer(function() pcall(Unlocker.applyUnlockState, v, k, itemType) end)
+            end
+        end
+        if oldNewindex then
+            return oldNewindex(t, k, v)
+        end
+        rawset(t, k, v)
+    end
+
+    pcall(setmetatable, tbl, mt)
+end
+
+Unlocker.forceRefreshVirtualItems = function(onlyType)
+    if State.refresh_running then return end
+    State.refresh_running = true
+
+    pcall(function()
+        local shop = State.shop_controller
+        if not shop or not shop._virtualItems then return end
+        local n = 0
+        local t = os.clock()
+
+        for itemType, items in pairs(shop._virtualItems) do
+            if ITEM_TYPES[itemType] and (not onlyType or itemType == onlyType) then
+                for key, vItem in pairs(items) do
+                    if typeof(vItem) == "table" then
+                        pcall(Unlocker.hookVirtualItem, vItem, key, itemType)
+                        if State.unlock_active then
+                            pcall(Unlocker.applyUnlockState, vItem, key, itemType)
+                        else
+                            vItem.__unlockApplied = nil
+                            vItem.__unlockSection = nil
+                            pcall(function() shop:_updateItemStatus(itemType, key) end)
+                        end
+                        n += 1
+                        if n % 8 == 0 and os.clock() - t >= 0.0012 then
+                            task.wait(); t = os.clock()
+                        end
+                    end
+                end
+            end
+        end
+
+        if State.unlock_active then
+            State.shop_spoofed = true
+            State.refresh_dirty = false
+        end
+    end)
+
+    State.refresh_running = false
+
+    -- Mark inventory pages dirty to force re-render
+    pcall(function()
+        local shop = State.shop_controller
+        if shop and shop._inventoryPages then
+            local types = onlyType and {onlyType} or {"Sword", "Explosion"}
+            for _, t in ipairs(types) do
+                local page = shop._inventoryPages[t]
+                if page and typeof(page.MarkDirty) == "function" then
+                    page.MarkDirty(nil, true, true)
+                end
+            end
+        end
+    end)
+end
+
+Unlocker.updateShopUI = function(itemType, equippedName)
+    local shop = State.shop_controller
+    if not shop or not shop._virtualItems then return end
+    local items = shop._virtualItems[itemType]
+    if not items then return end
+
+    local lastSlot = State.last_equipped_slot[itemType]
+    if lastSlot and lastSlot ~= equippedName then
+        local prev = items[lastSlot]
+        if typeof(prev) == "table" and typeof(prev.Section) == "table" and typeof(prev.Section.Set) == "function" then
+            pcall(prev.Section.Set, prev.Section, "Owned")
+            prev.__unlockSection = "Owned"
+        end
+    end
+
+    if equippedName then
+        local cur = items[equippedName]
+        if typeof(cur) == "table" and typeof(cur.Section) == "table" and typeof(cur.Section.Set) == "function" then
+            pcall(cur.Section.Set, cur.Section, "Equipped")
+            cur.__unlockSection = "Equipped"
+        end
+    end
+
+    State.last_equipped_slot[itemType] = equippedName
+end
+
+Unlocker.fireEquipChange = function(itemType)
+    local equipped = nil
+    if State.inventory_client then
+        pcall(function() equipped = State.inventory_client:GetEquipped(itemType) end)
+    end
+    for _, cb in ipairs(State.equip_callbacks[itemType] or {}) do
+        task.spawn(cb, equipped)
+    end
+    for _, cb in ipairs(State.inv_change_callbacks[itemType] or {}) do
+        task.spawn(cb, equipped)
+    end
+end
+
+Unlocker.equipSword = function(name)
+    if not State.item_info or not State.item_info.Sword[name] then return end
+    local oldName = State.equipped_skins.Sword
+    env.equipped_sword = name
+    env.sword_name = name
+    State.equipped_skins.Sword = name
+    Config.equipped_sword = name; persistConfig()
+
+    local char = localPlayer.Character
+    if char then
+        for _, child in ipairs(char:GetChildren()) do
+            if child:IsA("Model") and (State.item_info.Sword[child.Name] or child.Name == oldName) then
+                child:Destroy()
+            end
+        end
+    end
+
+    Unlocker.fireEquipChange("Sword")
+    Unlocker.updateShopUI("Sword", name)
+end
+
+Unlocker.equipExplosion = function(name)
+    if not State.item_info or not State.item_info.Explosion[name] then return end
+    env.explosion_name = name
+    env.equipped_explosion = name
+    State.equipped_skins.Explosion = name
+    Config.equipped_explosion = name; persistConfig()
+    Unlocker.fireEquipChange("Explosion")
+    Unlocker.updateShopUI("Explosion", name)
+end
+
+Unlocker.interceptEquip = function(...)
+    if not State.unlock_active then return false end
+    local args = table.pack(...)
+
+    local function extractName(arg)
+        if typeof(arg) == "string" then return arg end
+        if typeof(arg) == "table" then return arg.Id or arg.Name or arg.ItemId or arg.ItemKey end
+        return nil
+    end
+
+    for i = 1, args.n do
+        local name = extractName(args[i])
+        if typeof(name) ~= "string" then continue end
+        if State.item_info.Sword[name] then
+            Unlocker.equipSword(name); return true
+        end
+        if State.item_info.Explosion[name] then
+            Unlocker.equipExplosion(name); return true
+        end
+    end
+    return false
+end
+
+Unlocker.isShopVisible = function()
+    local pg = localPlayer:FindFirstChild("PlayerGui")
+    if not pg then return false end
+    local shop = pg:FindFirstChild("Shop") or pg:FindFirstChild("ShopGui") or pg:FindFirstChild("ShopFrame")
+    if not shop then
+        for _, d in ipairs(pg:GetDescendants()) do
+            if (d:IsA("GuiObject") or d:IsA("ScreenGui")) and d.Name:lower():match("shop") then
+                shop = d; break
+            end
+        end
+    end
+    if not shop then return false end
+    if shop:IsA("ScreenGui") then return shop.Enabled end
+    if shop:IsA("GuiObject") then return shop.Visible end
+    return false
+end
+
+Unlocker.loadModules = function()
+    if State.item_info and State.inventory_shared then return true end
+
+    local ok1, itemInfo = pcall(function() return require(ReplicatedStorage.Shared.ItemInfo) end)
+    if not ok1 or typeof(itemInfo) ~= "table" then return false end
+    State.item_info = itemInfo
+
+    local ok2, inv = pcall(function() return require(ReplicatedStorage.Shared.Inventory) end)
+    if not ok2 or typeof(inv) ~= "table" then return false end
+
+    local ok3, shared = pcall(function() return require(ReplicatedStorage.Shared.Inventory.Shared) end)
+    if not ok3 or typeof(shared) ~= "table" then shared = inv.Shared end
+    if typeof(shared) ~= "table" then return false end
+    State.inventory_shared = shared
+
+    local ok4, client = pcall(function() return inv.Client end)
+    if ok4 and typeof(client) == "table" then State.inventory_client = client end
+
+    return true
+end
+
+Unlocker.findShopController = function()
+    if State.shop_controller then return true end
+
+    for _, desc in ipairs(ReplicatedStorage:GetDescendants()) do
+        if desc:IsA("ModuleScript") and desc.Name:lower():match("shop") then
+            local ok, mod = pcall(require, desc)
+            if ok and typeof(mod) == "table" and mod._virtualItems then
+                State.shop_controller = mod
+                return true
+            end
+        end
+    end
+    return false
+end
+
 Unlocker.hookInventory = function()
     local shared = State.inventory_shared
     local client = State.inventory_client
     local itemInfo = State.item_info
     if not shared or not itemInfo then return false end
 
-    -- Save originals
     State.original_funcs = {
         Get = shared.Get,
         GetItem = shared.GetItem,
@@ -751,13 +1118,12 @@ Unlocker.hookInventory = function()
     }
     local orig = State.original_funcs
 
-    -- Hook shared.Get — inject all items as owned
+    -- Hook shared.Get — merge all catalog items into owned items
     shared.Get = function(self, player, itemType)
         local result = orig.Get(self, player, itemType)
-        if not State.unlock_active or player ~= nil or (itemType ~= "Sword" and itemType ~= "Explosion") then
+        if not State.unlock_active or player ~= nil or not ITEM_TYPES[itemType] then
             return result
         end
-        -- Check cache
         if State.merged_cache[itemType] and State.merged_ref[itemType] == result then
             return State.merged_cache[itemType]
         end
@@ -769,7 +1135,7 @@ Unlocker.hookInventory = function()
         end
         Unlocker.ensureStaticFakes(itemType)
         for key, fakeItem in pairs(State.static_fakes[itemType]) do
-            if not existing[fakeItem.Name] then
+            if not existing[fakeItem.Name] and not State.hidden_items[itemType][fakeItem.Name] then
                 merged[key] = fakeItem
             end
         end
@@ -778,55 +1144,50 @@ Unlocker.hookInventory = function()
         return merged
     end
 
-    -- Hook shared.GetItem — return fake item for anything in catalog
+    -- Hook shared.GetItem — return fake for anything in catalog
     shared.GetItem = function(self, player, itemType, itemName)
         local result = orig.GetItem(self, player, itemType, itemName)
-        if result or not State.unlock_active or player ~= nil or (itemType ~= "Sword" and itemType ~= "Explosion") then
+        if result or not State.unlock_active or player ~= nil or not ITEM_TYPES[itemType] then
             return result
         end
         local catalog = itemInfo[itemType]
         if not catalog then return result end
         if catalog[itemName] then
+            if State.hidden_items[itemType][itemName] then return result end
             local fake = Unlocker.fakeItem(itemType, itemName)
-            if itemType == "Sword" then
-                local info = catalog[itemName]
-                if info and info.HasFinisher then fake.Finisher = true end
-                if info and info.AccessoryToggleable then fake.Accessory = true end
-                if fake.Kills == nil then fake.Kills = 0 end
-            end
+            Unlocker.augmentSwordItem(itemType, itemName, fake)
             return fake
         end
-        -- Try string-to-item conversion
         local ok, conv = pcall(function() return shared:StringToItem(itemType, itemName) end)
         if ok and typeof(conv) == "table" and conv.Name and catalog[conv.Name] then
+            if State.hidden_items[itemType][conv.Name] then return result end
             if conv.Id == nil then conv.Id = conv.Name end
+            Unlocker.augmentSwordItem(itemType, conv.Name, conv)
             return conv
         end
         return result
     end
 
-    -- Hook shared.GetEquipped — return our spoofed equipped item
+    -- Hook shared.GetEquipped — return spoofed equipped skin
     shared.GetEquipped = function(self, player, itemType)
-        if State.unlock_active and player == nil and (itemType == "Sword" or itemType == "Explosion") then
-            local equipped = State.equipped[itemType]
-            if equipped then
-                return equipped
-            end
+        if State.unlock_active and player == nil and ITEM_TYPES[itemType] then
+            local equipped = State.equipped_skins[itemType]
+            if equipped then return equipped end
         end
         return orig.GetEquipped(self, player, itemType)
     end
 
-    -- Hook shared.OnEquip
+    -- Hook shared.OnEquip — track callbacks
     shared.OnEquip = function(self, player, itemType, callback)
-        if player == nil and (itemType == "Sword" or itemType == "Explosion") then
+        if player == nil and ITEM_TYPES[itemType] then
             table.insert(State.equip_callbacks[itemType], callback)
         end
         return orig.OnEquip(self, player, itemType, callback)
     end
 
-    -- Hook shared.OnInventoryChange
+    -- Hook shared.OnInventoryChange — track callbacks + bust cache
     shared.OnInventoryChange = function(self, player, itemType, callback)
-        if player == nil and (itemType == "Sword" or itemType == "Explosion") then
+        if player == nil and ITEM_TYPES[itemType] then
             table.insert(State.inv_change_callbacks[itemType], callback)
             return orig.OnInventoryChange(self, player, itemType, function(...)
                 State.merged_cache[itemType] = nil
@@ -842,43 +1203,32 @@ Unlocker.hookInventory = function()
     if typeof(orig.FindItemsWithKey) == "function" then
         shared.FindItemsWithKey = function(self, player, itemType, key)
             local result = orig.FindItemsWithKey(self, player, itemType, key)
-            if not State.unlock_active or player ~= nil or (itemType ~= "Sword" and itemType ~= "Explosion") then
+            if not State.unlock_active or player ~= nil or not ITEM_TYPES[itemType] then
                 return result
             end
             if typeof(result) == "table" and #result > 0 then return result end
-            local catalog = itemInfo[itemType]
             local itemName = key
-            if not (catalog and catalog[key]) then
+            if not (itemInfo[itemType] and itemInfo[itemType][key]) then
                 if client and typeof(client.KeyToItem) == "function" then
                     local ok, conv = pcall(function() return client:KeyToItem(key) end)
                     if ok and typeof(conv) == "table" and conv.Name then itemName = conv.Name end
                 end
             end
-            if itemName and catalog and catalog[itemName] and not Unlocker.isOwned(itemType, itemName) then
+            if itemName and itemInfo[itemType] and itemInfo[itemType][itemName] and not Unlocker.isReallyOwned(itemType, itemName) and not State.hidden_items[itemType][itemName] then
                 return { itemName }
             end
             return result
         end
     end
 
-    -- Hook client Equip/Unequip
+    -- Hook client.Equip / Unequip
     if client then
         local origEquip = client.Equip
         local origUnequip = client.Unequip
 
         if origEquip then
             client.Equip = function(self, itemId, ...)
-                if State.unlock_active then
-                    local name = itemId
-                    if typeof(itemId) == "table" then name = itemId.Id or itemId.Name or itemId.ItemId end
-                    if typeof(name) == "string" then
-                        if itemInfo.Sword[name] then
-                            Unlocker.equipSword(name); return true
-                        elseif itemInfo.Explosion[name] then
-                            Unlocker.equipExplosion(name); return true
-                        end
-                    end
-                end
+                if Unlocker.interceptEquip(itemId) then return true end
                 return origEquip(self, itemId, ...)
             end
         end
@@ -886,8 +1236,10 @@ Unlocker.hookInventory = function()
         if origUnequip then
             client.Unequip = function(self, itemType, ...)
                 if State.unlock_active and (itemType == "Sword" or itemType == "Explosion") then
-                    State.equipped[itemType] = nil
+                    State.equipped_skins[itemType] = nil
+                    Config["equipped_" .. itemType:lower()] = nil; persistConfig()
                     Unlocker.fireEquipChange(itemType)
+                    Unlocker.updateShopUI(itemType, nil)
                     return true
                 end
                 return origUnequip(self, itemType, ...)
@@ -895,14 +1247,14 @@ Unlocker.hookInventory = function()
         end
     end
 
-    -- Hook GetAttribute for sword display
+    -- Hook GetAttribute for sword rendering
     if hookfunction then
         pcall(function()
             local origGetAttr = game.GetAttribute
-            local hooked = hookfunction(game.GetAttribute, function(self, attr)
-                if State.unlock_active and (attr == "CurrentlyEquippedSword" or attr == "ShowSwordAccessory") then
-                    if attr == "CurrentlyEquippedSword" and State.equipped.Sword then
-                        return State.equipped.Sword
+            hookfunction(game.GetAttribute, function(self, attr)
+                if State.unlock_active then
+                    if attr == "CurrentlyEquippedSword" and State.equipped_skins.Sword then
+                        return State.equipped_skins.Sword
                     end
                 end
                 return origGetAttr(self, attr)
@@ -910,73 +1262,113 @@ Unlocker.hookInventory = function()
         end)
     end
 
-    return true
-end
-
-Unlocker.fireEquipChange = function(itemType)
-    for _, cb in ipairs(State.equip_callbacks[itemType] or {}) do
-        task.spawn(cb, State.equipped[itemType])
-    end
-end
-
-Unlocker.equipSword = function(name)
-    if not State.item_info or not State.item_info.Sword[name] then return end
-    State.equipped.Sword = name
-    env.equipped_sword = name
-    env.sword_name = name
-    Unlocker.fireEquipChange("Sword")
-    -- Destroy old sword model and trigger rebuild
-    local char = localPlayer.Character
-    if char then
-        for _, c in ipairs(char:GetChildren()) do
-            if c:IsA("Model") and State.item_info.Sword[c.Name] then c:Destroy() end
-        end
-    end
-end
-
-Unlocker.equipExplosion = function(name)
-    if not State.item_info or not State.item_info.Explosion[name] then return end
-    State.equipped.Explosion = name
-    env.equipped_explosion = name
-    env.explosion_name = name
-    Unlocker.fireEquipChange("Explosion")
-end
-
-Unlocker.refreshShop = function()
-    -- Find the shop controller and force refresh virtual items
+    -- Hook Net module for equip interception and delete handling
     pcall(function()
-        local controllers = ReplicatedStorage:FindFirstChild("Controllers")
-        if not controllers then return end
-        local shopCtrl = controllers:FindFirstChild("ShopController", true)
-        if not shopCtrl then return end
-        local mod = require(shopCtrl)
-        if typeof(mod) == "table" and mod._virtualItems then
-            for itemType, items in pairs(mod._virtualItems) do
-                if itemType == "Sword" or itemType == "Explosion" then
-                    for key, vItem in pairs(items) do
-                        if typeof(vItem) == "table" then
-                            -- Force OwnsItem to true
-                            if typeof(vItem.OwnsItem) == "table" and typeof(vItem.OwnsItem.Set) == "function" then
-                                pcall(vItem.OwnsItem.Set, vItem.OwnsItem, true)
+        for _, desc in ipairs(ReplicatedStorage:GetDescendants()) do
+            if desc:IsA("ModuleScript") and desc.Name == "Net" then
+                local ok, netMod = pcall(require, desc)
+                if ok and typeof(netMod) == "table" then
+                    -- Hook Net.Invoke for delete requests
+                    if typeof(netMod.Invoke) == "function" then
+                        local origInvoke = netMod.Invoke
+                        netMod.Invoke = function(self, method, data, ...)
+                            if State.unlock_active and method == "RequestDelete" and typeof(data) == "table" then
+                                local filtered = {}
+                                local hasReal = false
+                                for k, v in pairs(data) do
+                                    if typeof(v) == "table" and (k == "Sword" or k == "Explosion") then
+                                        for _, item in ipairs(v) do
+                                            local itemName
+                                            if typeof(item) == "table" then
+                                                itemName = item.Name or item.Id
+                                            elseif typeof(item) == "string" then
+                                                if itemInfo[k] and itemInfo[k][item] then
+                                                    itemName = item
+                                                elseif client and typeof(client.KeyToItem) == "function" then
+                                                    local s, r = pcall(function() return client:KeyToItem(item) end)
+                                                    if s and typeof(r) == "table" then itemName = r.Name end
+                                                end
+                                            end
+                                            if itemName and not Unlocker.isReallyOwned(k, itemName) then
+                                                State.hidden_items[k][itemName] = true
+                                                if State.equipped_skins[k] == itemName then
+                                                    State.equipped_skins[k] = nil
+                                                    Config["equipped_" .. k:lower()] = nil
+                                                end
+                                            else
+                                                filtered[k] = filtered[k] or {}
+                                                table.insert(filtered[k], item)
+                                                hasReal = true
+                                            end
+                                        end
+                                    else
+                                        filtered[k] = v
+                                        hasReal = true
+                                    end
+                                end
+                                State.refresh_dirty = true
+                                task.defer(Unlocker.forceRefreshVirtualItems)
+                                if hasReal then
+                                    return origInvoke(self, method, filtered, ...)
+                                end
+                                return true
                             end
-                            -- Force ForceHide to false (show the item)
-                            if typeof(vItem.ForceHide) == "table" and typeof(vItem.ForceHide.Set) == "function" then
-                                pcall(vItem.ForceHide.Set, vItem.ForceHide, false)
-                            end
-                            -- Set section to Owned
-                            if typeof(vItem.Section) == "table" and typeof(vItem.Section.Set) == "function" then
-                                local equippedName = State.equipped[itemType]
-                                local name = vItem.Name or key
-                                local section = (equippedName and (name == equippedName or vItem.Id == equippedName)) and "Equipped" or "Owned"
-                                pcall(vItem.Section.Set, vItem.Section, section)
-                            end
-                            vItem.NonPurchaseable = true
+                            return origInvoke(self, method, data, ...)
                         end
                     end
+
+                    -- Hook Net.Get for equip interception on remote events
+                    if typeof(netMod.Get) == "function" then
+                        local origGet = netMod.Get
+                        netMod.Get = function(self, evtName)
+                            local result = origGet(self, evtName)
+                            if typeof(result) == "table" then
+                                if typeof(result.Invoke) == "function" and not result.__equipHooked then
+                                    result.__equipHooked = true
+                                    local origInvoke = result.Invoke
+                                    result.Invoke = function(s, ...)
+                                        if Unlocker.interceptEquip(...) then return true end
+                                        return origInvoke(s, ...)
+                                    end
+                                end
+                                if typeof(result.Fire) == "function" and not result.__fireHooked then
+                                    result.__fireHooked = true
+                                    local origFire = result.Fire
+                                    result.Fire = function(s, ...)
+                                        if Unlocker.interceptEquip(...) then return true end
+                                        return origFire(s, ...)
+                                    end
+                                end
+                            end
+                            return result
+                        end
+                    end
+                    break
                 end
             end
         end
     end)
+
+    -- Hook _canDelete on shop controller
+    pcall(function()
+        local shop = State.shop_controller
+        if shop and typeof(shop._canDelete) == "function" and not shop.__canDeleteHooked then
+            shop.__canDeleteHooked = true
+            local origCanDelete = shop._canDelete
+            shop._canDelete = function(self, itemType, key, ...)
+                if State.unlock_active and (itemType == "Sword" or itemType == "Explosion") then
+                    local ok, conv = pcall(function() return client:KeyToItem(key) end)
+                    local name = ok and typeof(conv) == "table" and conv.Name
+                    if name and not Unlocker.isReallyOwned(itemType, name) and not State.hidden_items[itemType][name] then
+                        return true
+                    end
+                end
+                return origCanDelete(self, itemType, key, ...)
+            end
+        end
+    end)
+
+    return true
 end
 
 Unlocker.enable = function()
@@ -992,25 +1384,83 @@ Unlocker.enable = function()
     end
     State.unlock_active = true
     Config.unlock_all_enabled = true
-    -- Clear caches so hooks pick up
     State.merged_cache = { Sword = nil, Explosion = nil }
     State.merged_ref = { Sword = nil, Explosion = nil }
     State.owned_cache = { Sword = nil, Explosion = nil }
     State.shop_spoofed = false
-    -- Refresh shop after short delay
-    task.delay(0.5, function()
-        Unlocker.refreshShop()
-        State.shop_spoofed = true
+    State.refresh_dirty = true
+    env.unlock_all_skins = true
+
+    -- Restore saved equipped skins
+    if Config.equipped_sword and State.item_info and State.item_info.Sword[Config.equipped_sword] then
+        State.equipped_skins.Sword = Config.equipped_sword
+        env.equipped_sword = Config.equipped_sword
+        env.sword_name = Config.equipped_sword
+    end
+    if Config.equipped_explosion and State.item_info and State.item_info.Explosion[Config.equipped_explosion] then
+        State.equipped_skins.Explosion = Config.equipped_explosion
+        env.equipped_explosion = Config.equipped_explosion
+        env.explosion_name = Config.equipped_explosion
+    end
+
+    -- Set up equip functions on getgenv for the game to call
+    env.equip_sword_skin = Unlocker.equipSword
+    env.equip_explosion_skin = Unlocker.equipExplosion
+
+    -- Find and hook shop controller
+    task.spawn(function()
+        for i = 1, 30 do
+            if Unlocker.findShopController() then
+                local shop = State.shop_controller
+                -- Hook all existing virtual items
+                for itemType, items in pairs(shop._virtualItems) do
+                    if ITEM_TYPES[itemType] then
+                        for key, vItem in pairs(items) do
+                            pcall(Unlocker.hookVirtualItem, vItem, key, itemType)
+                        end
+                        Unlocker.hookVirtualItemsTable(items, itemType)
+                    end
+                end
+                -- Hook _canDelete
+                pcall(function()
+                    if typeof(shop._canDelete) == "function" and not shop.__canDeleteHooked then
+                        shop.__canDeleteHooked = true
+                        local origCanDelete = shop._canDelete
+                        shop._canDelete = function(self, itemType, key, ...)
+                            if State.unlock_active and ITEM_TYPES[itemType] and State.inventory_client then
+                                local ok2, conv = pcall(function() return State.inventory_client:KeyToItem(key) end)
+                                local name = ok2 and typeof(conv) == "table" and conv.Name
+                                if name and not Unlocker.isReallyOwned(itemType, name) and not State.hidden_items[itemType][name] then
+                                    return true
+                                end
+                            end
+                            return origCanDelete(self, itemType, key, ...)
+                        end
+                    end
+                end)
+                -- Force refresh
+                Unlocker.forceRefreshVirtualItems()
+                break
+            end
+            task.wait(0.5)
+        end
     end)
+
+    persistConfig()
     return true
 end
 
 Unlocker.disable = function()
     State.unlock_active = false
     Config.unlock_all_enabled = false
+    env.unlock_all_skins = false
     State.merged_cache = { Sword = nil, Explosion = nil }
     State.merged_ref = { Sword = nil, Explosion = nil }
-    -- Shop will revert on next open since hooks check unlock_active
+    State.shop_spoofed = false
+    if State.shop_controller then
+        Unlocker.forceRefreshVirtualItems()
+    end
+    persistConfig()
 end
 
 ------------------------------------------------------------------------
@@ -1030,7 +1480,6 @@ local function createUI()
     pcall(function() gui.Parent = CoreGui end)
     if not gui.Parent then gui.Parent = playerGui end
 
-    -- Theme
     local C = {
         bg        = Color3.fromRGB(18, 18, 26),
         card      = Color3.fromRGB(28, 28, 40),
@@ -1048,10 +1497,9 @@ local function createUI()
 
     local tweenInfo = TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 
-    -- Main
     local main = Instance.new("Frame")
-    main.Size = UDim2.new(0, 320, 0, 500)
-    main.Position = UDim2.new(1, -340, 0.5, -250)
+    main.Size = UDim2.new(0, 320, 0, 520)
+    main.Position = UDim2.new(1, -340, 0.5, -260)
     main.BackgroundColor3 = C.bg
     main.BorderSizePixel = 0
     main.Active = true
@@ -1061,7 +1509,6 @@ local function createUI()
     local mainStroke = Instance.new("UIStroke", main)
     mainStroke.Color = C.border; mainStroke.Thickness = 1
 
-    -- Shadow
     local shadow = Instance.new("ImageLabel")
     shadow.Size = UDim2.new(1, 30, 1, 30)
     shadow.Position = UDim2.new(0, -15, 0, -15)
@@ -1074,7 +1521,6 @@ local function createUI()
     shadow.ZIndex = -1
     shadow.Parent = main
 
-    -- Header
     local header = Instance.new("Frame")
     header.Size = UDim2.new(1, 0, 0, 44)
     header.BackgroundColor3 = C.header
@@ -1083,7 +1529,6 @@ local function createUI()
     local hc = Instance.new("UICorner", header); hc.CornerRadius = UDim.new(0, 12)
     local hfill = Instance.new("Frame", header); hfill.Size = UDim2.new(1, 0, 0, 14); hfill.Position = UDim2.new(0, 0, 1, -14); hfill.BackgroundColor3 = C.header; hfill.BorderSizePixel = 0
 
-    -- Accent bar under header
     local accentBar = Instance.new("Frame", main)
     accentBar.Size = UDim2.new(1, -24, 0, 2)
     accentBar.Position = UDim2.new(0, 12, 0, 44)
@@ -1093,29 +1538,26 @@ local function createUI()
 
     local title = Instance.new("TextLabel", header)
     title.Size = UDim2.new(1, -80, 1, 0); title.Position = UDim2.new(0, 16, 0, 0)
-    title.BackgroundTransparency = 1; title.Text = "⚡ Avatar Changer"
+    title.BackgroundTransparency = 1; title.Text = "Avatar Changer"
     title.TextColor3 = C.text; title.TextSize = 15; title.Font = Enum.Font.GothamBold
     title.TextXAlignment = Enum.TextXAlignment.Left
 
-    -- Minimize
     local minBtn = Instance.new("TextButton", header)
     minBtn.Size = UDim2.new(0, 28, 0, 28); minBtn.Position = UDim2.new(1, -68, 0, 8)
-    minBtn.BackgroundColor3 = C.input; minBtn.Text = "—"; minBtn.TextColor3 = C.dim
+    minBtn.BackgroundColor3 = C.input; minBtn.Text = "_"; minBtn.TextColor3 = C.dim
     minBtn.TextSize = 14; minBtn.Font = Enum.Font.GothamBold; minBtn.BorderSizePixel = 0
     Instance.new("UICorner", minBtn).CornerRadius = UDim.new(0, 6)
 
-    -- Close
     local closeBtn = Instance.new("TextButton", header)
     closeBtn.Size = UDim2.new(0, 28, 0, 28); closeBtn.Position = UDim2.new(1, -36, 0, 8)
     closeBtn.BackgroundColor3 = C.danger; closeBtn.BackgroundTransparency = 0.7
-    closeBtn.Text = "✕"; closeBtn.TextColor3 = C.dim
+    closeBtn.Text = "X"; closeBtn.TextColor3 = C.dim
     closeBtn.TextSize = 12; closeBtn.Font = Enum.Font.GothamBold; closeBtn.BorderSizePixel = 0
     Instance.new("UICorner", closeBtn).CornerRadius = UDim.new(0, 6)
 
     closeBtn.MouseButton1Click:Connect(function() main.Visible = false end)
     minBtn.MouseButton1Click:Connect(function() main.Visible = false end)
 
-    -- Scroll
     local scroll = Instance.new("ScrollingFrame", main)
     scroll.Size = UDim2.new(1, -16, 1, -56); scroll.Position = UDim2.new(0, 8, 0, 52)
     scroll.BackgroundTransparency = 1; scroll.BorderSizePixel = 0
@@ -1200,34 +1642,34 @@ local function createUI()
 
     -- Avatar Changer
     mkSection("AVATAR CHANGER")
-    local avatarInput = mkInput("Username or UserId to copy...", "", function(t) Config.avatar_target = t; Config.spoof_avatar_user = t end)
-    mkToggle("Enable Avatar Changer", false, function(on)
-        Config.avatar_enabled = on
+    local avatarInput = mkInput("Username or UserId to copy...", Config.avatar_target, function(t) Config.avatar_target = t; Config.spoof_avatar_user = t; persistConfig() end)
+    mkToggle("Enable Avatar Changer", Config.avatar_enabled, function(on)
+        Config.avatar_enabled = on; persistConfig()
         if on then Avatar.saveOriginal(); if Config.avatar_target ~= "" then Avatar.apply(Config.avatar_target) end
         else Avatar.restore() end
     end)
-    mkButton("🔄  Restore Original", Color3.fromRGB(70, 70, 95), function()
-        Config.avatar_enabled = false; Avatar.restore()
+    mkButton("Restore Original", Color3.fromRGB(70, 70, 95), function()
+        Config.avatar_enabled = false; persistConfig(); Avatar.restore()
     end)
 
     mkSpacer(6)
 
     -- Quick Toggles
     mkSection("QUICK TOGGLES")
-    mkToggle("Headless", false, setHeadless)
-    mkToggle("Korblox Leg", false, setKorblox)
+    mkToggle("Headless", Config.headless_enabled, setHeadless)
+    mkToggle("Korblox Leg", Config.korblox_enabled, setKorblox)
 
     mkSpacer(6)
 
     -- Name Spoofer
     mkSection("NAME SPOOFER")
-    mkToggle("Enable Name Spoofer", false, function(on)
-        Config.spoofer_enabled = on
+    mkToggle("Enable Name Spoofer", Config.spoofer_enabled, function(on)
+        Config.spoofer_enabled = on; persistConfig()
         if on then Spoofer.init() end
     end)
-    mkInput("Spoofed Username", "", function(t) Config.spoof_username = t end)
-    mkInput("Spoofed Display Name", "", function(t) Config.spoof_displayname = t end)
-    mkInput("Avatar Thumbnail User", "", function(t) Config.spoof_avatar_user = t end)
+    mkInput("Spoofed Username", Config.spoof_username, function(t) Config.spoof_username = t; persistConfig() end)
+    mkInput("Spoofed Display Name", Config.spoof_displayname, function(t) Config.spoof_displayname = t; persistConfig() end)
+    mkInput("Avatar Thumbnail User", Config.spoof_avatar_user, function(t) Config.spoof_avatar_user = t; persistConfig() end)
 
     mkSpacer(6)
 
@@ -1239,12 +1681,12 @@ local function createUI()
     unlockStatus.TextSize = 11; unlockStatus.Font = Enum.Font.Gotham
     unlockStatus.TextXAlignment = Enum.TextXAlignment.Left; unlockStatus.LayoutOrder = nextOrd()
 
-    mkToggle("Unlock All Swords + Explosions", false, function(on)
+    mkToggle("Unlock All Swords + Explosions", Config.unlock_all_enabled, function(on)
         if on then
             unlockStatus.Text = "  Status: Loading..."
             task.spawn(function()
                 local ok = Unlocker.enable()
-                unlockStatus.Text = ok and "  Status: Active ✓" or "  Status: Failed ✗"
+                unlockStatus.Text = ok and "  Status: Active" or "  Status: Failed"
                 unlockStatus.TextColor3 = ok and C.accent2 or C.danger
             end)
         else
@@ -1255,8 +1697,8 @@ local function createUI()
     end)
 
     local note = Instance.new("TextLabel", scroll)
-    note.Size = UDim2.new(1, -4, 0, 32); note.BackgroundTransparency = 1
-    note.Text = "  Open the sword/explosion shop after enabling.\n  Click any item to equip it."
+    note.Size = UDim2.new(1, -4, 0, 40); note.BackgroundTransparency = 1
+    note.Text = "  Open the sword/explosion shop after enabling.\n  Click any item to equip. You can also delete\n  fake items — they reappear on re-enable."
     note.TextColor3 = C.dim; note.TextSize = 10; note.Font = Enum.Font.Gotham
     note.TextXAlignment = Enum.TextXAlignment.Left; note.TextWrapped = true; note.LayoutOrder = nextOrd()
 
@@ -1294,6 +1736,7 @@ local function createUI()
                 kBtn.Text = input.KeyCode.Name
                 kBtn.TextColor3 = C.accent
                 listening = false
+                persistConfig()
                 conn:Disconnect()
             end
         end)
@@ -1310,13 +1753,46 @@ local function createUI()
     -- Respawn hook
     addConn(localPlayer.CharacterAdded:Connect(function(char) Avatar.reapplyOnSpawn(char) end))
 
-    -- Continuous shop refresh while unlock is active
+    -- Background loop: refresh shop when visible + unlock active
     task.spawn(function()
+        local wasVisible = false
         while gui.Parent do
             if State.unlock_active then
-                pcall(Unlocker.refreshShop)
+                local visible = Unlocker.isShopVisible()
+                if visible and (not wasVisible or State.refresh_dirty or not State.shop_spoofed) then
+                    task.spawn(function()
+                        Unlocker.forceRefreshVirtualItems()
+                    end)
+                end
+                wasVisible = visible
             end
-            task.wait(2)
+            task.wait(visible and 0.3 or 1.5)
+        end
+    end)
+
+    -- Auto-enable features that were saved as on
+    task.spawn(function()
+        task.wait(0.5)
+        if Config.avatar_enabled and Config.avatar_target ~= "" then
+            Avatar.saveOriginal()
+            Avatar.apply(Config.avatar_target)
+        end
+        if Config.headless_enabled then
+            local char = localPlayer.Character
+            if char then applyHeadless(char) end
+        end
+        if Config.korblox_enabled then
+            local char = localPlayer.Character
+            if char then applyKorblox(char) end
+        end
+        if Config.spoofer_enabled then
+            Spoofer.init()
+        end
+        if Config.unlock_all_enabled then
+            unlockStatus.Text = "  Status: Loading..."
+            local ok = Unlocker.enable()
+            unlockStatus.Text = ok and "  Status: Active" or "  Status: Failed"
+            unlockStatus.TextColor3 = ok and C.accent2 or C.danger
         end
     end)
 
@@ -1330,4 +1806,4 @@ Avatar.saveOriginal()
 local gui = createUI()
 
 print("[Avatar Changer] Loaded! Press " .. Config.toggle_key.Name .. " to toggle UI.")
-print("[Avatar Changer] Change the keybind in Settings section.")
+print("[Avatar Changer] Settings are saved automatically between executions.")
