@@ -6000,7 +6000,7 @@ do
         local atr = hum and hum:FindFirstChildOfClass("Animator")
         if not atr or char:GetAttribute("InOverdriveMech") then return end
         stopTracksWithAttrs(atr, {"SuccessParry", "Parry", "GrabParry"})
-        if not fixSwordAPI then return end
+        if not fixSwordAPI then warn("[AnimFix] SwordAPI not loaded") return end
         local folder = fixSwordAPI.Collection.Default
         pcall(function()
             local sd = ReplicatedStorage.Shared.ReplicatedInstances.Swords.GetSword:Invoke(char:GetAttribute("CurrentlyEquippedSword") or "")
@@ -6046,7 +6046,10 @@ do
         if (os.clock() - fixLastPlayed) >= 0.1 or fixBypassCd then
             fixLastPlayed = os.clock()
             fixBypassCd = false
-            pcall(playGrabZenthra)
+            local ok, err = pcall(playGrabZenthra)
+            if not ok then
+                warn("[AnimFix] " .. tostring(err))
+            end
         end
     end
     pcall(function()
@@ -6398,8 +6401,7 @@ local autoParryToggle = MainTab:CreateToggle({
                     if _G.config.det_forcefield and Det.Forcefield_Active then return end
 
                     if ballTarget == LocalPlayer.Name and distance <= targetDistance then
-                        if _G.config.animfix and tick() - lastParryFix > 0.5 then
-                            lastParryFix = tick()
+                        if _G.config.animfix then
                             playParryFix()
                         end
                         BallHelper.parry(_G.config.curve_method)
