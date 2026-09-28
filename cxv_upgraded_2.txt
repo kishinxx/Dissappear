@@ -6977,12 +6977,22 @@ local function applyAccuracy(value)
     SpeedDivisorMultiplier = 0.55 + (value - 1) * 0.008080808080808
 end
 
+local _lastRolledAccuracy = nil
 local function rollRandomAccuracy()
     local lo = math.clamp(tonumber(_G.config.random_accuracy_min) or 25, 1, 100)
     local hi = math.clamp(tonumber(_G.config.random_accuracy_max) or 65, 1, 100)
     if lo > hi then lo, hi = hi, lo end
     if lo == hi then hi = math.min(hi + 1, 100) end
-    local rolled = math.random(lo, hi)
+    local range = hi - lo
+    local minGap = math.clamp(math.floor(range * 0.15), 5, 10)
+    local rolled
+    for _ = 1, 20 do
+        rolled = math.random(lo, hi)
+        if not _lastRolledAccuracy or math.abs(rolled - _lastRolledAccuracy) >= minGap then
+            break
+        end
+    end
+    _lastRolledAccuracy = rolled
     applyAccuracy(rolled)
 end
 
