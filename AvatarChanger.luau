@@ -27,6 +27,9 @@ local newcclosure = newcclosure or function(f) return f end
 local cloneref = cloneref or function(o) return o end
 local getrawmetatable = getrawmetatable or getmetatable
 local setreadonly = setreadonly or function() end
+local getconnections = getconnections or nil
+local getupvalues = getupvalues or getupvals or nil
+local islclosure = islclosure or isourclosure or function() return false end
 
 ------------------------------------------------------------------------
 -- SERVICES (cloneref where supported to reduce anti-cheat surface)
@@ -1277,14 +1280,22 @@ end
 
 Unlocker.findSwordsController = function()
     if State.swords_controller then return State.swords_controller end
-    local controllers = ReplicatedStorage:FindFirstChild("Controllers")
-    if not controllers then return nil end
-    for _, child in ipairs(controllers:GetDescendants()) do
-        if child:IsA("ModuleScript") and child.Name:find("Sword") then
-            local ok, mod = pcall(require, child)
-            if ok and typeof(mod) == "table" and typeof(mod.SetSword) == "function" then
-                State.swords_controller = mod
-                return mod
+    if not getconnections then return nil end
+    local ok, remotes = pcall(function()
+        return ReplicatedStorage:FindFirstChild("Remotes") and ReplicatedStorage.Remotes:FindFirstChild("FireSwordInfo")
+    end)
+    if not ok or not remotes then return nil end
+    local ok2, conns = pcall(getconnections, remotes.OnClientEvent)
+    if not ok2 or typeof(conns) ~= "table" then return nil end
+    for _, conn in ipairs(conns) do
+        if conn.Function and islclosure(conn.Function) then
+            local ok3, upvals = pcall(getupvalues, conn.Function)
+            if ok3 and typeof(upvals) == "table" and #upvals == 1 and typeof(upvals[1]) == "table" then
+                local tbl = upvals[1]
+                if typeof(tbl.SetSword) == "function" then
+                    State.swords_controller = tbl
+                    return tbl
+                end
             end
         end
     end
@@ -1747,6 +1758,14 @@ Unlocker.enable = function()
         Unlocker.hookShopButtons()
     end)
 
+    -- Background: find swords_controller via getconnections for VFX/SFX
+    task.spawn(function()
+        for i = 1, 20 do
+            if Unlocker.findSwordsController() then break end
+            task.wait(0.5)
+        end
+    end)
+
     persistConfig()
     return true
 end
@@ -2193,23 +2212,30 @@ Emotes.buildEmoteList = function()
         if not (btn:IsA("TextButton") or btn:IsA("ImageButton")) then
             btn = item:FindFirstChildWhichIsA("GuiButton")
         end
-        if btn then
-            local conn = btn.Activated:Connect(function()
-                if not State.emote_enabled then return end
-                local slot = Emotes.currentAbsSlot()
-                State.emote_virtual[slot] = emoteName
-                persistConfig()
-                Emotes.repaintWheel()
-                local ew2 = Emotes.getEmoteWheel()
-                if ew2 then
-                    local listFrame = ew2:FindFirstChild("List")
-                    if listFrame and listFrame:IsA("GuiObject") then
-                        listFrame.Visible = false
-                    end
-                end
-            end)
-            table.insert(State.emote_connections, conn)
+        if not btn then
+            btn = Instance.new("TextButton")
+            btn.Name = "ClickOverlay"
+            btn.Text = ""
+            btn.BackgroundTransparency = 1
+            btn.Size = UDim2.fromScale(1, 1)
+            btn.ZIndex = 10
+            btn.Parent = item
         end
+        local conn = btn.Activated:Connect(function()
+            if not State.emote_enabled then return end
+            local slot = Emotes.currentAbsSlot()
+            State.emote_virtual[slot] = emoteName
+            persistConfig()
+            Emotes.repaintWheel()
+            local ew2 = Emotes.getEmoteWheel()
+            if ew2 then
+                local listFrame = ew2:FindFirstChild("List")
+                if listFrame and listFrame:IsA("GuiObject") then
+                    listFrame.Visible = false
+                end
+            end
+        end)
+        table.insert(State.emote_connections, conn)
 
         item.Parent = clone
         count += 1
