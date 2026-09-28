@@ -161,6 +161,8 @@ local State = {
     swords_module = nil,
     swords_controller = nil,
     replicated_instances = nil,
+    sword_char_conns = {},
+    sword_busy = false,
 
     -- Emotes
     emote_enabled = false,
@@ -1302,72 +1304,157 @@ Unlocker.findSwordsController = function()
     return nil
 end
 
-Unlocker.applySwordModel = function(char, swordName)
-    if not char then return end
-    -- Pre-load model into ReplicatedInstances cache
-    pcall(function()
-        local ri = Unlocker.findReplicatedInstances()
-        if ri and typeof(ri.GetInstance) == "function" then
-            ri:GetInstance("Swords", swordName)
-        end
-    end)
+Unlocker.applySwordModel = function(char, swordName, forceModel)
+    if not char then return false end
+    State.sword_busy = true
+    local ok = pcall(function()
+        -- Set attributes first so game systems recognize the sword
+        char:SetAttribute("CurrentlyEquippedSword", swordName)
+        localPlayer:SetAttribute("CurrentlyEquippedSword", swordName)
 
-    -- Try the game's own EquipSwordTo (may work now that model is cached)
-    local swordsMod = Unlocker.findSwordsModule()
-    local equipped = false
-    if swordsMod and typeof(swordsMod.EquipSwordTo) == "function" then
-        pcall(function() swordsMod:EquipSwordTo(char, swordName) end)
-        if char:FindFirstChild(swordName) then equipped = true end
-    end
-
-    -- Fallback: manually fetch and parent the model
-    if not equipped then
-        local model = Unlocker.fetchSwordModel(swordName)
-        if model then
-            model.Name = swordName
-            local rightHand = char:FindFirstChild("RightHand") or char:FindFirstChild("Right Arm")
-            if rightHand then
-                model.Parent = char
-                pcall(function()
-                    local grip = rightHand:FindFirstChild("RightGrip") or rightHand:FindFirstChildWhichIsA("Motor6D")
-                    if grip then
-                        grip.Part1 = model.PrimaryPart or model:FindFirstChildWhichIsA("BasePart")
-                    else
-                        local weld = Instance.new("Motor6D")
-                        weld.Name = "RightGrip"
-                        weld.Part0 = rightHand
-                        weld.Part1 = model.PrimaryPart or model:FindFirstChildWhichIsA("BasePart")
-                        weld.Parent = rightHand
-                    end
-                end)
-            else
-                model.Parent = char
-            end
-        end
-    end
-
-    -- Update sword animations via SwordsController or Swords module
-    local sc = Unlocker.findSwordsController()
-    if sc then
-        pcall(function() sc:SetSword(swordName) end)
-    elseif swordsMod and typeof(swordsMod.SetSword) == "function" then
-        pcall(function() swordsMod:SetSword(swordName) end)
-    end
-end
-
-Unlocker.setSwordAttributes = function(char, swordName)
-    pcall(function() char:SetAttribute("CurrentlyEquippedSword", swordName) end)
-    pcall(function() localPlayer:SetAttribute("CurrentlyEquippedSword", swordName) end)
-    -- Set slash effect name from sword info
-    local swordsMod = Unlocker.findSwordsModule()
-    if swordsMod and typeof(swordsMod.GetSword) == "function" then
-        pcall(function()
+        -- Set slash effect name
+        local swordsMod = Unlocker.findSwordsModule()
+        if swordsMod and typeof(swordsMod.GetSword) == "function" then
             local info = swordsMod:GetSword(swordName)
             if info and info.SlashName then
                 char:SetAttribute("SlashEffect", info.SlashName)
             end
-        end)
+        end
+
+        -- Set VFX/SFX via swords_controller:SetSword
+        local sc = Unlocker.findSwordsController()
+        if sc then
+            pcall(function() sc:SetSword(swordName) end)
+        end
+
+        -- Pre-load model into ReplicatedInstances cache
+        local ri = Unlocker.findReplicatedInstances()
+        if ri and typeof(ri.GetInstance) == "function" then
+            ri:GetInstance("Swords", swordName)
+        end
+
+        -- Equip model if not already present or forced
+        if forceModel or not char:FindFirstChild(swordName) then
+            if swordsMod and typeof(swordsMod.EquipSwordTo) == "function" then
+                pcall(function() swordsMod:EquipSwordTo(char, swordName) end)
+            end
+            if not char:FindFirstChild(swordName) then
+                local model = Unlocker.fetchSwordModel(swordName)
+                if model then
+                    model.Name = swordName
+                    local rightHand = char:FindFirstChild("RightHand") or char:FindFirstChild("Right Arm")
+                    if rightHand then
+                        model.Parent = char
+                        local grip = rightHand:FindFirstChild("RightGrip") or rightHand:FindFirstChildWhichIsA("Motor6D")
+                        if grip then
+                            grip.Part1 = model.PrimaryPart or model:FindFirstChildWhichIsA("BasePart")
+                        else
+                            local weld = Instance.new("Motor6D")
+                            weld.Name = "RightGrip"
+                            weld.Part0 = rightHand
+                            weld.Part1 = model.PrimaryPart or model:FindFirstChildWhichIsA("BasePart")
+                            weld.Parent = rightHand
+                        end
+                    else
+                        model.Parent = char
+                    end
+                end
+            end
+        end
+    end)
+    State.sword_busy = false
+    return ok and char:FindFirstChild(swordName) ~= nil
+end
+
+Unlocker.cleanupSwordCharConns = function()
+    for _, c in ipairs(State.sword_char_conns) do
+        pcall(function() c:Disconnect() end)
     end
+    State.sword_char_conns = {}
+end
+
+Unlocker.monitorCharacter = function(char)
+    if not char then return end
+    Unlocker.cleanupSwordCharConns()
+    local swordName = State.equipped_skins.Sword
+    if not swordName or swordName == "" then return end
+
+    -- When the game removes our custom sword model, re-apply it
+    table.insert(State.sword_char_conns, char.ChildRemoved:Connect(function(child)
+        if State.sword_busy then return end
+        if not State.unlock_active then return end
+        local name = State.equipped_skins.Sword
+        if not name or name == "" then return end
+        if child:IsA("Model") and child.Name == name then
+            if not char:FindFirstChild(name) then
+                task.delay(0.06, function()
+                    if localPlayer.Character ~= char then return end
+                    if not State.unlock_active then return end
+                    State.sword_busy = false
+                    Unlocker.applySwordModel(char, name, true)
+                end)
+            end
+        end
+    end))
+
+    -- When the game adds the real sword (after respawn), replace it with ours
+    table.insert(State.sword_char_conns, char.ChildAdded:Connect(function(child)
+        if State.sword_busy then return end
+        if not State.unlock_active then return end
+        local name = State.equipped_skins.Sword
+        if not name or name == "" then return end
+        if child:IsA("Model") and State.item_info and State.item_info.Sword[child.Name] and child.Name ~= name then
+            task.delay(0.06, function()
+                if localPlayer.Character ~= char then return end
+                if not State.unlock_active then return end
+                State.sword_busy = false
+                Unlocker.applySwordModel(char, name, true)
+            end)
+        end
+    end))
+end
+
+Unlocker.setupRespawn = function()
+    if State.sword_respawn_conn then
+        pcall(function() State.sword_respawn_conn:Disconnect() end)
+    end
+    State.sword_respawn_conn = localPlayer.CharacterAdded:Connect(function(char)
+        task.defer(function()
+            if not State.unlock_active then return end
+            local name = State.equipped_skins.Sword
+            if not name or name == "" then return end
+            Unlocker.monitorCharacter(char)
+            -- Wait for character to be alive and have a sword equipped
+            local deadline = os.clock() + 8
+            while os.clock() < deadline do
+                if localPlayer.Character ~= char then return end
+                local hum = char:FindFirstChildOfClass("Humanoid")
+                local hrp = char:FindFirstChild("HumanoidRootPart")
+                if hum and hum.Health > 0 and hrp then
+                    local hasSword = false
+                    for _, child in ipairs(char:GetChildren()) do
+                        if child:IsA("Model") and State.item_info and State.item_info.Sword[child.Name] then
+                            hasSword = true; break
+                        end
+                    end
+                    local attr = char:GetAttribute("CurrentlyEquippedSword") or localPlayer:GetAttribute("CurrentlyEquippedSword")
+                    if hasSword or (typeof(attr) == "string" and attr ~= "") then break end
+                end
+                task.wait(0.1)
+            end
+            if localPlayer.Character ~= char then return end
+            if not State.unlock_active or State.equipped_skins.Sword ~= name then return end
+            -- Apply with retries
+            for i = 1, 4 do
+                if localPlayer.Character ~= char then return end
+                if char:FindFirstChild(name) then return end
+                State.sword_busy = false
+                Unlocker.applySwordModel(char, name, true)
+                task.wait(0.25)
+            end
+        end)
+    end)
+    addConn(State.sword_respawn_conn)
 end
 
 Unlocker.equipSword = function(name)
@@ -1380,13 +1467,15 @@ Unlocker.equipSword = function(name)
 
     local char = localPlayer.Character
     if char then
+        State.sword_busy = true
         for _, child in ipairs(char:GetChildren()) do
             if child:IsA("Model") and (State.item_info.Sword[child.Name] or child.Name == oldName) then
                 child:Destroy()
             end
         end
-        Unlocker.applySwordModel(char, name)
-        Unlocker.setSwordAttributes(char, name)
+        State.sword_busy = false
+        Unlocker.applySwordModel(char, name, true)
+        Unlocker.monitorCharacter(char)
         -- Retry with increasing delays until model appears
         task.spawn(function()
             for _, delay in ipairs({0.15, 0.3, 0.5, 1.0}) do
@@ -1394,8 +1483,8 @@ Unlocker.equipSword = function(name)
                 local c = localPlayer.Character
                 if not c or State.equipped_skins.Sword ~= name then return end
                 if c:FindFirstChild(name) then return end
-                Unlocker.applySwordModel(c, name)
-                Unlocker.setSwordAttributes(c, name)
+                State.sword_busy = false
+                Unlocker.applySwordModel(c, name, true)
             end
         end)
     end
@@ -1700,8 +1789,8 @@ Unlocker.enable = function()
             if State.equipped_skins.Sword == Config.equipped_sword then
                 local char = localPlayer.Character
                 if char then
-                    Unlocker.applySwordModel(char, Config.equipped_sword)
-                    Unlocker.setSwordAttributes(char, Config.equipped_sword)
+                    Unlocker.applySwordModel(char, Config.equipped_sword, true)
+                    Unlocker.monitorCharacter(char)
                 end
             end
         end)
@@ -1766,6 +1855,9 @@ Unlocker.enable = function()
         end
     end)
 
+    -- Set up respawn monitoring for sword persistence
+    Unlocker.setupRespawn()
+
     persistConfig()
     return true
 end
@@ -1777,6 +1869,11 @@ Unlocker.disable = function()
     State.merged_cache = { Sword = nil, Explosion = nil }
     State.merged_ref = { Sword = nil, Explosion = nil }
     State.shop_spoofed = false
+    Unlocker.cleanupSwordCharConns()
+    if State.sword_respawn_conn then
+        pcall(function() State.sword_respawn_conn:Disconnect() end)
+        State.sword_respawn_conn = nil
+    end
     for _, conn in ipairs(State.buy_button_conns) do
         pcall(function() conn:Disconnect() end)
     end
@@ -2186,6 +2283,7 @@ Emotes.buildEmoteList = function()
 
     clone.Parent = list
     State.emote_our_container = clone
+    content.Visible = false
 
     local catalog = State.item_info and State.item_info.Emote
     if typeof(catalog) ~= "table" then return false end
@@ -2259,6 +2357,7 @@ Emotes.syncListVisibility = function()
     local function sync()
         if not State.emote_enabled or not State.emote_our_container then
             if content then content.Visible = list.Visible end
+            if ourList then ourList.Visible = false end
             return
         end
         ourList.Visible = list.Visible
@@ -2267,6 +2366,12 @@ Emotes.syncListVisibility = function()
 
     sync()
     table.insert(State.emote_connections, list:GetPropertyChangedSignal("Visible"):Connect(sync))
+    table.insert(State.emote_connections, content:GetPropertyChangedSignal("Visible"):Connect(function()
+        if State.emote_enabled and State.emote_our_container and content.Visible then
+            content.Visible = false
+            ourList.Visible = true
+        end
+    end))
 end
 
 Emotes.refreshEmoteList = function()
