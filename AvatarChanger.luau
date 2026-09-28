@@ -2112,9 +2112,7 @@ Emotes.buildEmoteList = function()
     local clone = content:Clone()
     clone.Name = "CustomEmoteList"
     for _, child in ipairs(clone:GetChildren()) do
-        if not (child.Name == "TEMPLATE" or child:IsA("UIGridLayout") or child:IsA("UIListLayout")
-            or child:IsA("UIPadding") or child:IsA("UIAspectRatioConstraint")
-            or child:IsA("UIScale") or child:IsA("UICorner") or child:IsA("UIStroke")) then
+        if not (child.Name == "TEMPLATE" or child:IsA("UIGridLayout") or child:IsA("UIListLayout") or child:IsA("UIPadding") or child:IsA("UIAspectRatioConstraint") or child:IsA("UIScale") or child:IsA("UICorner") or child:IsA("UIStroke")) then
             pcall(function() child:Destroy() end)
         end
     end
@@ -2153,8 +2151,7 @@ Emotes.buildEmoteList = function()
         item.Name = emoteName
         item.Visible = true
 
-        local nameLabel = item:FindFirstChild("ItemName") or item:FindFirstChild("Name")
-            or item:FindFirstChild("TextLabel") or item:FindFirstChildWhichIsA("TextLabel")
+        local nameLabel = item:FindFirstChild("ItemName") or item:FindFirstChild("Name") or item:FindFirstChild("TextLabel") or item:FindFirstChildWhichIsA("TextLabel")
         if nameLabel and nameLabel:IsA("TextLabel") then
             nameLabel.Text = Emotes.getDisplayName(emoteName)
         end
