@@ -6860,7 +6860,10 @@ end)
 local triggerActive = false
 local function isInRound()
     local char = LocalPlayer.Character
-    return char and char.Parent == workspace:FindFirstChild("Alive")
+    if not char then return false end
+    local alive = workspace:FindFirstChild("Alive")
+    if not alive then return true end
+    return char.Parent == alive
 end
 
 local function Trigger(ball)
