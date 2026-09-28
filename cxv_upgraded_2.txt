@@ -69,6 +69,8 @@ _G.config = {
     announcer_text = nil,
     auto_parry_keybind = nil,
     auto_parry_notify = nil,
+    ability_triggerbot = nil,
+    ability_triggerbot_notify = nil,
 }
 
 if not isfolder("angeli/configs") then
@@ -6883,6 +6885,78 @@ MainTab:CreateToggle({
         if triggerMobileBtn then
             triggerMobileBtn.Visible = enabled
         end
+    end
+})
+
+local abilityTriggerActive = false
+
+local abilityTriggerbotToggle = MainTab:CreateToggle({
+    Name = "Ability Triggerbot",
+    CurrentValue = false,
+    Flag = "AbilityTriggerbot",
+    Callback = function(enabled)
+        _G.ability_triggerbot = enabled
+        if enabled then
+            if _G.config.ability_triggerbot_notify then
+                Library:Notify({ Title = "Ability Triggerbot", Content = "On", Duration = 2 })
+            end
+            Connections.ability_triggerbot = RunService.PreSimulation:Connect(function()
+                if not isInRound() then return end
+                if abilityTriggerActive then return end
+                local ball = BallHelper.get_ball()
+                if not ball then return end
+                if ball:GetAttribute("target") ~= LocalPlayer.Name then return end
+
+                abilityTriggerActive = true
+                pcall(function()
+                    keypress(0x51)
+                    task.wait(0.03)
+                    keyrelease(0x51)
+                end)
+
+                ball:GetAttributeChangedSignal("target"):Once(function()
+                    abilityTriggerActive = false
+                end)
+
+                task.spawn(function()
+                    local start = tick()
+                    repeat RunService.PreSimulation:Wait()
+                    until tick() - start >= 1 or not abilityTriggerActive
+                    abilityTriggerActive = false
+                end)
+            end)
+        else
+            if _G.config.ability_triggerbot_notify then
+                Library:Notify({ Title = "Ability Triggerbot", Content = "Off", Duration = 2 })
+            end
+            if Connections.ability_triggerbot then
+                Connections.ability_triggerbot:Disconnect()
+                Connections.ability_triggerbot = nil
+            end
+            abilityTriggerActive = false
+        end
+    end
+})
+
+local abilityTriggerbotKey = MainTab:CreateKeybind({
+    Name = "Ability Triggerbot Key",
+    CurrentKeybind = _G.config.ability_triggerbot or "Y",
+    Flag = "AbilityTriggerbotKey",
+    Callback = function()
+        abilityTriggerbotToggle:Set(not abilityTriggerbotToggle:Get())
+    end,
+    OnChanged = function(key)
+        _G.config.ability_triggerbot = key.Name
+    end,
+})
+attachKeybind(abilityTriggerbotToggle, abilityTriggerbotKey)
+
+MainTab:CreateToggle({
+    Name = "Ability Triggerbot Notify",
+    CurrentValue = _G.config.ability_triggerbot_notify or false,
+    Flag = "AbilityTriggerbotNotify",
+    Callback = function(enabled)
+        _G.config.ability_triggerbot_notify = enabled
     end
 })
 
