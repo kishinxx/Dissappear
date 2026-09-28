@@ -631,6 +631,9 @@ end
 -- NAME SPOOFER (PlayerGui + Workspace + CoreGui)
 ------------------------------------------------------------------------
 local Spoofer = {}
+Spoofer._applying = false
+Spoofer._tracked = {} -- weak table: label -> { original = string }
+setmetatable(Spoofer._tracked, { __mode = "k" })
 
 Spoofer.getAvatarUid = function()
     local n = Config.spoof_avatar_user
@@ -638,19 +641,35 @@ Spoofer.getAvatarUid = function()
     return resolveUserId(n) or localPlayer.UserId
 end
 
+Spoofer.applySpoof = function(text)
+    if typeof(text) ~= "string" or text == "" then return text, false end
+    local t = text; local changed = false
+    if Config.spoof_displayname ~= "" and string.find(t, localPlayer.DisplayName, 1, true) then
+        changed = true; t = replaceStr(t, localPlayer.DisplayName, Config.spoof_displayname)
+    end
+    if Config.spoof_username ~= "" and string.find(t, localPlayer.Name, 1, true) then
+        changed = true; t = replaceStr(t, localPlayer.Name, Config.spoof_username)
+    end
+    return t, changed
+end
+
 Spoofer.hookText = function(label)
     if not label:IsA("TextLabel") and not label:IsA("TextButton") then return end
+    if Spoofer._tracked[label] then return end
+    Spoofer._tracked[label] = { original = label.Text, type = "text" }
+
     local function upd()
-        if not Config.spoofer_enabled then return end
-        local t = label.Text; if typeof(t) ~= "string" or t == "" then return end
-        local changed = false
-        if Config.spoof_displayname ~= "" and string.find(t, localPlayer.DisplayName, 1, true) then
-            changed = true; t = replaceStr(t, localPlayer.DisplayName, Config.spoof_displayname)
+        if Spoofer._applying then return end
+        local t = label.Text; if typeof(t) ~= "string" then return end
+        -- If the game set new text, update original
+        Spoofer._tracked[label].original = t
+        if not Config.spoofer_enabled or t == "" then return end
+        local spoofed, changed = Spoofer.applySpoof(t)
+        if changed then
+            Spoofer._applying = true
+            label.Text = spoofed
+            Spoofer._applying = false
         end
-        if Config.spoof_username ~= "" and string.find(t, localPlayer.Name, 1, true) then
-            changed = true; t = replaceStr(t, localPlayer.Name, Config.spoof_username)
-        end
-        if changed then label.Text = t end
     end
     upd()
     table.insert(State.spoofer_connections, label:GetPropertyChangedSignal("Text"):Connect(upd))
@@ -658,13 +677,22 @@ end
 
 Spoofer.hookImage = function(label)
     if not label:IsA("ImageLabel") and not label:IsA("ImageButton") then return end
+    if Spoofer._tracked[label] then return end
+    Spoofer._tracked[label] = { original = label.Image, type = "image" }
+
     local function upd()
-        if not Config.spoofer_enabled then return end
+        if Spoofer._applying then return end
         local img = label.Image; if typeof(img) ~= "string" or img == "" then return end
+        Spoofer._tracked[label].original = img
+        if not Config.spoofer_enabled then return end
         local myId = tostring(localPlayer.UserId)
         if string.find(img, myId, 1, true) then
             local sid = Spoofer.getAvatarUid()
-            if sid ~= localPlayer.UserId then label.Image = string.gsub(img, myId, tostring(sid)) end
+            if sid ~= localPlayer.UserId then
+                Spoofer._applying = true
+                label.Image = string.gsub(img, myId, tostring(sid))
+                Spoofer._applying = false
+            end
         end
     end
     upd()
@@ -695,9 +723,49 @@ Spoofer.hookChat = function()
     end
 end
 
+Spoofer.revertAll = function()
+    Spoofer._applying = true
+    for label, info in pairs(Spoofer._tracked) do
+        pcall(function()
+            if info.type == "text" and (label:IsA("TextLabel") or label:IsA("TextButton")) then
+                label.Text = info.original
+            elseif info.type == "image" and (label:IsA("ImageLabel") or label:IsA("ImageButton")) then
+                label.Image = info.original
+            end
+        end)
+    end
+    Spoofer._applying = false
+end
+
+Spoofer.reapplyAll = function()
+    Spoofer._applying = true
+    for label, info in pairs(Spoofer._tracked) do
+        pcall(function()
+            if info.type == "text" and (label:IsA("TextLabel") or label:IsA("TextButton")) then
+                local spoofed, changed = Spoofer.applySpoof(info.original)
+                label.Text = changed and spoofed or info.original
+            elseif info.type == "image" and (label:IsA("ImageLabel") or label:IsA("ImageButton")) then
+                local img = info.original
+                local myId = tostring(localPlayer.UserId)
+                if string.find(img, myId, 1, true) then
+                    local sid = Spoofer.getAvatarUid()
+                    if sid ~= localPlayer.UserId then
+                        label.Image = string.gsub(img, myId, tostring(sid))
+                    else
+                        label.Image = info.original
+                    end
+                end
+            end
+        end)
+    end
+    Spoofer._applying = false
+end
+
 Spoofer.init = function()
     for _, c in ipairs(State.spoofer_connections) do pcall(function() c:Disconnect() end) end
     State.spoofer_connections = {}
+    Spoofer._tracked = {}
+    setmetatable(Spoofer._tracked, { __mode = "k" })
     Spoofer.hookContainer(playerGui)
     Spoofer.hookContainer(workspace)
     pcall(function() Spoofer.hookContainer(CoreGui) end)
@@ -883,7 +951,8 @@ end
 
 -- Hook __newindex on virtual items table so new items get hooked automatically
 Unlocker.hookVirtualItemsTable = function(tbl, itemType)
-    local mt = getrawmetatable(tbl) or {}
+    local getRawMT = getrawmetatable or getmetatable
+    local mt = getRawMT(tbl) or {}
     local oldNewindex = mt.__newindex
 
     mt.__newindex = function(t, k, v)
@@ -983,10 +1052,7 @@ Unlocker.updateShopUI = function(itemType, equippedName)
 end
 
 Unlocker.fireEquipChange = function(itemType)
-    local equipped = nil
-    if State.inventory_client then
-        pcall(function() equipped = State.inventory_client:GetEquipped(itemType) end)
-    end
+    local equipped = State.equipped_skins[itemType]
     for _, cb in ipairs(State.equip_callbacks[itemType] or {}) do
         task.spawn(cb, equipped)
     end
@@ -1030,19 +1096,33 @@ Unlocker.interceptEquip = function(...)
     if not State.unlock_active then return false end
     local args = table.pack(...)
 
-    local function extractName(arg)
-        if typeof(arg) == "string" then return arg end
-        if typeof(arg) == "table" then return arg.Id or arg.Name or arg.ItemId or arg.ItemKey end
-        return nil
+    local function extractInfo(arg)
+        if typeof(arg) == "string" then return nil, arg end
+        if typeof(arg) == "table" then
+            local itemType = arg.ItemType or arg.Type or arg.itemType
+            local name = arg.Id or arg.Name or arg.ItemId or arg.ItemKey or arg.Key or arg.key
+            return itemType, name
+        end
+        return nil, nil
     end
 
     for i = 1, args.n do
-        local name = extractName(args[i])
+        local itemType, name = extractInfo(args[i])
         if typeof(name) ~= "string" then continue end
-        if State.item_info.Sword[name] then
+
+        if itemType then
+            if itemType == "Sword" and State.item_info.Sword[name] and not Unlocker.isReallyOwned("Sword", name) then
+                Unlocker.equipSword(name); return true
+            end
+            if itemType == "Explosion" and State.item_info.Explosion[name] and not Unlocker.isReallyOwned("Explosion", name) then
+                Unlocker.equipExplosion(name); return true
+            end
+        end
+
+        if State.item_info.Sword[name] and not Unlocker.isReallyOwned("Sword", name) then
             Unlocker.equipSword(name); return true
         end
-        if State.item_info.Explosion[name] then
+        if State.item_info.Explosion[name] and not Unlocker.isReallyOwned("Explosion", name) then
             Unlocker.equipExplosion(name); return true
         end
     end
@@ -1082,7 +1162,14 @@ Unlocker.loadModules = function()
     State.inventory_shared = shared
 
     local ok4, client = pcall(function() return inv.Client end)
-    if ok4 and typeof(client) == "table" then State.inventory_client = client end
+    if ok4 and typeof(client) == "table" then
+        State.inventory_client = client
+    else
+        local ok5, clientMod = pcall(function() return require(ReplicatedStorage.Shared.Inventory.Client) end)
+        if ok5 and typeof(clientMod) == "table" then
+            State.inventory_client = clientMod
+        end
+    end
 
     return true
 end
@@ -1367,6 +1454,53 @@ Unlocker.hookInventory = function()
             end
         end
     end)
+
+    -- Hook shop controller's equip method directly if it exists
+    pcall(function()
+        local shop = State.shop_controller
+        if shop then
+            -- Hook _equipItem / equipItem / onEquipClicked or similar equip entry point
+            for _, methodName in ipairs({"_equipItem", "equipItem", "_onEquipClicked", "onEquipClicked", "EquipItem", "_equip"}) do
+                if typeof(shop[methodName]) == "function" and not shop["__" .. methodName .. "Hooked"] then
+                    shop["__" .. methodName .. "Hooked"] = true
+                    local origMethod = shop[methodName]
+                    shop[methodName] = function(self, itemType, key, ...)
+                        if State.unlock_active and ITEM_TYPES[itemType or ""] then
+                            local name = key
+                            if client and typeof(client.KeyToItem) == "function" then
+                                local ok2, conv = pcall(function() return client:KeyToItem(key) end)
+                                if ok2 and typeof(conv) == "table" and conv.Name then name = conv.Name end
+                            end
+                            if name and not Unlocker.isReallyOwned(itemType, name) then
+                                if itemType == "Sword" then Unlocker.equipSword(name); return end
+                                if itemType == "Explosion" then Unlocker.equipExplosion(name); return end
+                            end
+                        end
+                        return origMethod(self, itemType, key, ...)
+                    end
+                end
+            end
+        end
+    end)
+
+    -- Hook __namecall on game for RemoteFunction/RemoteEvent interception (fallback)
+    local hookmetamethod = hookmetamethod or getgenv and getgenv().hookmetamethod
+    if hookmetamethod then
+        pcall(function()
+            local origNamecall = hookmetamethod(game, "__namecall", function(self, ...)
+                local method = getnamecallmethod and getnamecallmethod()
+                if State.unlock_active and method and (method == "InvokeServer" or method == "FireServer") then
+                    if self:IsA("RemoteFunction") or self:IsA("RemoteEvent") then
+                        local name = self.Name:lower()
+                        if name:match("equip") or name:match("inventory") then
+                            if Unlocker.interceptEquip(...) then return true end
+                        end
+                    end
+                end
+                return origNamecall(self, ...)
+            end)
+        end)
+    end
 
     return true
 end
@@ -1665,11 +1799,24 @@ local function createUI()
     mkSection("NAME SPOOFER")
     mkToggle("Enable Name Spoofer", Config.spoofer_enabled, function(on)
         Config.spoofer_enabled = on; persistConfig()
-        if on then Spoofer.init() end
+        if on then
+            Spoofer.init()
+        else
+            Spoofer.revertAll()
+        end
     end)
-    mkInput("Spoofed Username", Config.spoof_username, function(t) Config.spoof_username = t; persistConfig() end)
-    mkInput("Spoofed Display Name", Config.spoof_displayname, function(t) Config.spoof_displayname = t; persistConfig() end)
-    mkInput("Avatar Thumbnail User", Config.spoof_avatar_user, function(t) Config.spoof_avatar_user = t; persistConfig() end)
+    mkInput("Spoofed Username", Config.spoof_username, function(t)
+        Config.spoof_username = t; persistConfig()
+        if Config.spoofer_enabled then Spoofer.reapplyAll() end
+    end)
+    mkInput("Spoofed Display Name", Config.spoof_displayname, function(t)
+        Config.spoof_displayname = t; persistConfig()
+        if Config.spoofer_enabled then Spoofer.reapplyAll() end
+    end)
+    mkInput("Avatar Thumbnail User", Config.spoof_avatar_user, function(t)
+        Config.spoof_avatar_user = t; persistConfig()
+        if Config.spoofer_enabled then Spoofer.reapplyAll() end
+    end)
 
     mkSpacer(6)
 
@@ -1766,7 +1913,7 @@ local function createUI()
                 end
                 wasVisible = visible
             end
-            task.wait(visible and 0.3 or 1.5)
+            task.wait(wasVisible and 0.3 or 1.5)
         end
     end)
 
