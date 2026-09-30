@@ -926,17 +926,36 @@ Titles.enable = function()
         warn("[Titles] Failed to load TitleData")
         return false
     end
-    State.title_data = td
 
-    local ok2, tl = pcall(function()
+    -- Normalize TitleData into a flat array
+    local titleArray = {}
+    for k, v in pairs(td) do
+        if typeof(v) == "table" and v.Tag then
+            if typeof(k) == "number" then
+                titleArray[k] = v
+            else
+                table.insert(titleArray, v)
+            end
+        end
+    end
+    -- Fill gaps if numeric keys had holes
+    local titleList2 = {}
+    for _, v in pairs(titleArray) do
+        table.insert(titleList2, v)
+    end
+    State.title_data = titleList2
+
+    warn("[Titles] Found " .. #titleList2 .. " titles in TitleData")
+
+    local ok2, settingsGui = pcall(function()
         return playerGui:WaitForChild("Settings", 10)
     end)
-    if not ok2 or not tl then
+    if not ok2 or not settingsGui then
         warn("[Titles] Failed to find Settings GUI")
         return false
     end
     local ok3, titleList = pcall(function()
-        return tl.Frame.Frame:WaitForChild("SettingTitles", 10):WaitForChild("TitleList", 10)
+        return settingsGui.Frame.Frame:WaitForChild("SettingTitles", 10):WaitForChild("TitleList", 10)
     end)
     if not ok3 or not titleList then
         warn("[Titles] Failed to find TitleList")
@@ -949,6 +968,8 @@ Titles.enable = function()
     State.title_buttons = {}
     State.title_cloned = {}
 
+    -- Gather all existing buttons
+    local existingButtons = {}
     for _, child in ipairs(titleList:GetChildren()) do
         if child:IsA("ImageButton") or child:IsA("Frame") then
             local label = child:FindFirstChild("TextLabel")
@@ -959,38 +980,42 @@ Titles.enable = function()
                 LabelColor = label and label.TextColor3 or nil,
                 LayoutOrder = child.LayoutOrder,
             }
+            table.insert(existingButtons, child)
         end
     end
 
-    for _, child in ipairs(titleList:GetChildren()) do
-        if child:IsA("ImageButton") or child:IsA("Frame") then
-            table.insert(State.title_buttons, child)
-        end
-    end
-
-    table.sort(State.title_buttons, function(a, b)
+    table.sort(existingButtons, function(a, b)
         return a.LayoutOrder < b.LayoutOrder
     end)
 
-    -- Count how many title data entries we have (generic iteration for Luau tables)
-    local titleCount = 0
-    for _ in td do titleCount = titleCount + 1 end
+    warn("[Titles] Found " .. #existingButtons .. " existing buttons in TitleList")
 
-    -- Need titleCount + 1 buttons (first is "None"). Clone template if we need more.
-    local needed = titleCount + 1
+    -- Find an ImageButton template for cloning
     local template = nil
-    for _, btn in ipairs(State.title_buttons) do
+    for _, btn in ipairs(existingButtons) do
         if btn:IsA("ImageButton") then
             template = btn
             break
         end
     end
 
-    if template and #State.title_buttons < needed then
+    if not template then
+        warn("[Titles] No ImageButton template found in TitleList")
+        return false
+    end
+
+    -- We need: 1 "None" button + #titleList2 title buttons
+    local needed = #titleList2 + 1
+    State.title_buttons = existingButtons
+
+    -- Clone more buttons if needed
+    if #State.title_buttons < needed then
+        warn("[Titles] Cloning " .. (needed - #State.title_buttons) .. " extra buttons")
         for i = #State.title_buttons + 1, needed do
             local clone = template:Clone()
             clone.LayoutOrder = i
             clone.Visible = true
+            clone.Name = "TitleClone_" .. i
             clone.Parent = titleList
             local sel = clone:FindFirstChild("Selected")
             if sel then sel.Visible = false end
@@ -999,34 +1024,24 @@ Titles.enable = function()
         end
     end
 
-    -- Populate buttons with all titles from TitleData (k starts at 1, button k+1)
-    local k = 0
-    for _, titleInfo in td do
-        k = k + 1
-        local titleButton = State.title_buttons[k + 1]
+    -- Button 1 = "None" (keep as-is), buttons 2+ = titles
+    for i, titleInfo in ipairs(titleList2) do
+        local titleButton = State.title_buttons[i + 1]
         if titleButton then
             local textLabel = titleButton:FindFirstChild("TextLabel")
             if textLabel then
                 textLabel.Text = titleInfo.Tag.Text
                 textLabel.TextColor3 = titleInfo.Tag.Color
             end
-            titleButton.Name = titleInfo.Name
+            titleButton.Name = titleInfo.Name or ("Title_" .. i)
             titleButton.Visible = true
-            titleButton.LayoutOrder = k + 1
+            titleButton.LayoutOrder = i + 1
         end
     end
 
     -- Hook button clicks
     for _, conn in ipairs(State.title_connections) do pcall(function() conn:Disconnect() end) end
     State.title_connections = {}
-
-    -- Build a lookup from TitleData by index for the click handler
-    local tdByIndex = {}
-    local idx2 = 0
-    for _, titleInfo in td do
-        idx2 = idx2 + 1
-        tdByIndex[idx2] = titleInfo
-    end
 
     for i, titleButton in ipairs(State.title_buttons) do
         if titleButton:IsA("ImageButton") then
@@ -1036,7 +1051,7 @@ Titles.enable = function()
                     State.title_chat_tag = nil
                     Config.selected_title = nil
                 else
-                    local titleInfo = tdByIndex[tdIdx]
+                    local titleInfo = titleList2[tdIdx]
                     if titleInfo then
                         State.title_chat_tag = { Text = titleInfo.Tag.Text, Color = titleInfo.Tag.Color }
                         Config.selected_title = titleInfo.Name
@@ -1058,7 +1073,7 @@ Titles.enable = function()
 
     -- Restore previously selected title
     if Config.selected_title then
-        for i, titleInfo in ipairs(tdByIndex) do
+        for i, titleInfo in ipairs(titleList2) do
             if titleInfo.Name == Config.selected_title then
                 State.title_chat_tag = { Text = titleInfo.Tag.Text, Color = titleInfo.Tag.Color }
                 local btn = State.title_buttons[i + 1]
@@ -2019,6 +2034,11 @@ Unlocker.applySwordModel = function(char, swordName, forceModel)
                 Unlocker.removeSwordModels(char, swordName)
             end
         end)
+        task.delay(2, function()
+            if localPlayer.Character == char and State.unlock_active then
+                Unlocker.removeSwordModels(char, swordName)
+            end
+        end)
     end)
     State.sword_busy = false
     return ok
@@ -2093,19 +2113,28 @@ Unlocker.monitorCharacter = function(char)
         end
     end))
 
-    -- When the game adds a different sword model, replace with ours
+    -- When the game adds a different sword model, remove it (keeps ours)
     table.insert(State.sword_char_conns, char.ChildAdded:Connect(function(child)
-        if State.sword_busy then return end
         if not State.unlock_active then return end
         local name = State.equipped_skins.Sword
         if not name or name == "" then return end
-        if child:IsA("Model") and State.item_info and State.item_info.Sword[child.Name] and child.Name ~= name then
-            task.delay(0.06, function()
-                if localPlayer.Character ~= char then return end
-                if not State.unlock_active then return end
-                State.sword_busy = false
-                Unlocker.applySwordModel(char, name, true)
-            end)
+        if child:IsA("Model") and child.Name ~= name then
+            local isSword = false
+            if State.item_info and State.item_info.Sword[child.Name] then
+                isSword = true
+            end
+            if not isSword then
+                pcall(function()
+                    isSword = ReplicatedStorage.Shared.ReplicatedInstances.Swords.GetSword:Invoke(child.Name) ~= nil
+                end)
+            end
+            if isSword then
+                task.defer(function()
+                    if child and child.Parent then
+                        child:Destroy()
+                    end
+                end)
+            end
         end
     end))
 
