@@ -194,6 +194,7 @@ local State = {
     title_button_state = {},
     title_chat_tag = nil,
     title_connections = {},
+    title_cloned = {},
     sword_char_conns = {},
     sword_attr_conns = {},
     sword_busy = false,
@@ -928,19 +929,27 @@ Titles.enable = function()
     State.title_data = td
 
     local ok2, tl = pcall(function()
-        return playerGui.Settings.Frame.Frame:WaitForChild("SettingTitles"):WaitForChild("TitleList")
+        return playerGui:WaitForChild("Settings", 10)
     end)
     if not ok2 or not tl then
+        warn("[Titles] Failed to find Settings GUI")
+        return false
+    end
+    local ok3, titleList = pcall(function()
+        return tl.Frame.Frame:WaitForChild("SettingTitles", 10):WaitForChild("TitleList", 10)
+    end)
+    if not ok3 or not titleList then
         warn("[Titles] Failed to find TitleList")
         return false
     end
-    State.title_list = tl
+    State.title_list = titleList
 
     -- Save original button state for revert
     State.title_button_state = {}
     State.title_buttons = {}
+    State.title_cloned = {}
 
-    for _, child in ipairs(tl:GetChildren()) do
+    for _, child in ipairs(titleList:GetChildren()) do
         if child:IsA("ImageButton") or child:IsA("Frame") then
             local label = child:FindFirstChild("TextLabel")
             State.title_button_state[child] = {
@@ -953,7 +962,7 @@ Titles.enable = function()
         end
     end
 
-    for _, child in ipairs(tl:GetChildren()) do
+    for _, child in ipairs(titleList:GetChildren()) do
         if child:IsA("ImageButton") or child:IsA("Frame") then
             table.insert(State.title_buttons, child)
         end
@@ -963,8 +972,37 @@ Titles.enable = function()
         return a.LayoutOrder < b.LayoutOrder
     end)
 
-    -- Populate buttons with all titles from TitleData
-    for k, titleInfo in ipairs(State.title_data) do
+    -- Count how many title data entries we have (generic iteration for Luau tables)
+    local titleCount = 0
+    for _ in td do titleCount = titleCount + 1 end
+
+    -- Need titleCount + 1 buttons (first is "None"). Clone template if we need more.
+    local needed = titleCount + 1
+    local template = nil
+    for _, btn in ipairs(State.title_buttons) do
+        if btn:IsA("ImageButton") then
+            template = btn
+            break
+        end
+    end
+
+    if template and #State.title_buttons < needed then
+        for i = #State.title_buttons + 1, needed do
+            local clone = template:Clone()
+            clone.LayoutOrder = i
+            clone.Visible = true
+            clone.Parent = titleList
+            local sel = clone:FindFirstChild("Selected")
+            if sel then sel.Visible = false end
+            table.insert(State.title_buttons, clone)
+            table.insert(State.title_cloned, clone)
+        end
+    end
+
+    -- Populate buttons with all titles from TitleData (k starts at 1, button k+1)
+    local k = 0
+    for _, titleInfo in td do
+        k = k + 1
         local titleButton = State.title_buttons[k + 1]
         if titleButton then
             local textLabel = titleButton:FindFirstChild("TextLabel")
@@ -974,8 +1012,7 @@ Titles.enable = function()
             end
             titleButton.Name = titleInfo.Name
             titleButton.Visible = true
-        else
-            break
+            titleButton.LayoutOrder = k + 1
         end
     end
 
@@ -983,15 +1020,23 @@ Titles.enable = function()
     for _, conn in ipairs(State.title_connections) do pcall(function() conn:Disconnect() end) end
     State.title_connections = {}
 
-    for _, titleButton in ipairs(State.title_buttons) do
+    -- Build a lookup from TitleData by index for the click handler
+    local tdByIndex = {}
+    local idx2 = 0
+    for _, titleInfo in td do
+        idx2 = idx2 + 1
+        tdByIndex[idx2] = titleInfo
+    end
+
+    for i, titleButton in ipairs(State.title_buttons) do
         if titleButton:IsA("ImageButton") then
             local conn = titleButton.Activated:Connect(function()
-                local idx = titleButton.LayoutOrder - 1
-                if idx == 0 then
+                local tdIdx = i - 1
+                if tdIdx == 0 then
                     State.title_chat_tag = nil
                     Config.selected_title = nil
                 else
-                    local titleInfo = State.title_data[idx]
+                    local titleInfo = tdByIndex[tdIdx]
                     if titleInfo then
                         State.title_chat_tag = { Text = titleInfo.Tag.Text, Color = titleInfo.Tag.Color }
                         Config.selected_title = titleInfo.Name
@@ -1013,10 +1058,10 @@ Titles.enable = function()
 
     -- Restore previously selected title
     if Config.selected_title then
-        for k, titleInfo in ipairs(State.title_data) do
+        for i, titleInfo in ipairs(tdByIndex) do
             if titleInfo.Name == Config.selected_title then
                 State.title_chat_tag = { Text = titleInfo.Tag.Text, Color = titleInfo.Tag.Color }
-                local btn = State.title_buttons[k + 1]
+                local btn = State.title_buttons[i + 1]
                 if btn then
                     for _, tb in ipairs(State.title_buttons) do
                         local sel = tb:FindFirstChild("Selected")
@@ -1068,6 +1113,14 @@ Titles.disable = function()
     State.title_chat_tag = nil
     Config.title_enabled = false
     Config.selected_title = nil
+
+    -- Destroy cloned buttons
+    if State.title_cloned then
+        for _, clone in ipairs(State.title_cloned) do
+            pcall(function() clone:Destroy() end)
+        end
+        State.title_cloned = {}
+    end
 
     -- Restore original button state
     if State.title_list then
