@@ -79,6 +79,8 @@ local function saveConfig(cfg)
             spoof_avatar_user = cfg.spoof_avatar_user or "",
             unlock_all_enabled = cfg.unlock_all_enabled or false,
             emote_enabled = cfg.emote_enabled or false,
+            title_enabled = cfg.title_enabled or false,
+            selected_title = cfg.selected_title,
             equipped_sword = cfg.equipped_sword,
             equipped_explosion = cfg.equipped_explosion,
             sword_favorites = cfg.sword_favorites or nil,
@@ -115,6 +117,8 @@ local Config = {
     equipped_sword = saved and saved.equipped_sword or nil,
     equipped_explosion = saved and saved.equipped_explosion or nil,
     emote_enabled = saved and saved.emote_enabled or false,
+    title_enabled = saved and saved.title_enabled or false,
+    selected_title = saved and saved.selected_title or nil,
     toggle_key = Enum.KeyCode.RightShift,
 }
 
@@ -182,6 +186,14 @@ local State = {
     sword_favorites = {},
     sword_info_handler = nil,
     replicated_instances = nil,
+
+    -- Titles
+    title_data = nil,
+    title_list = nil,
+    title_buttons = {},
+    title_button_state = {},
+    title_chat_tag = nil,
+    title_connections = {},
     sword_char_conns = {},
     sword_attr_conns = {},
     sword_busy = false,
@@ -745,6 +757,8 @@ Avatar.reapplyOnSpawn = function(char)
     end)
 end
 
+local Titles -- forward declaration
+
 ------------------------------------------------------------------------
 -- NAME SPOOFER (PlayerGui + Workspace + CoreGui)
 ------------------------------------------------------------------------
@@ -828,6 +842,10 @@ Spoofer.hookContainer = function(container)
 end
 
 Spoofer.hookChat = function()
+    if Config.title_enabled then
+        Titles.hookChat()
+        return
+    end
     if not TextChatService then return end
     TextChatService.OnIncomingMessage = function(msg)
         local props = Instance.new("TextChatMessageProperties")
@@ -888,6 +906,196 @@ Spoofer.init = function()
     Spoofer.hookContainer(workspace)
     pcall(function() Spoofer.hookContainer(CoreGui) end)
     Spoofer.hookChat()
+end
+
+------------------------------------------------------------------------
+-- TITLE UNLOCK ALL
+------------------------------------------------------------------------
+Titles = {}
+
+local function colorToHex(c)
+    return string.format("#%02X%02X%02X", c.R * 255, c.G * 255, c.B * 255)
+end
+
+Titles.enable = function()
+    local ok, td = pcall(function()
+        return require(ReplicatedStorage.Shared.TitleData)
+    end)
+    if not ok or not td then
+        warn("[Titles] Failed to load TitleData")
+        return false
+    end
+    State.title_data = td
+
+    local ok2, tl = pcall(function()
+        return playerGui.Settings.Frame.Frame:WaitForChild("SettingTitles"):WaitForChild("TitleList")
+    end)
+    if not ok2 or not tl then
+        warn("[Titles] Failed to find TitleList")
+        return false
+    end
+    State.title_list = tl
+
+    -- Save original button state for revert
+    State.title_button_state = {}
+    State.title_buttons = {}
+
+    for _, child in ipairs(tl:GetChildren()) do
+        if child:IsA("ImageButton") or child:IsA("Frame") then
+            local label = child:FindFirstChild("TextLabel")
+            State.title_button_state[child] = {
+                Name = child.Name,
+                Visible = child.Visible,
+                LabelText = label and label.Text or nil,
+                LabelColor = label and label.TextColor3 or nil,
+                LayoutOrder = child.LayoutOrder,
+            }
+        end
+    end
+
+    for _, child in ipairs(tl:GetChildren()) do
+        if child:IsA("ImageButton") or child:IsA("Frame") then
+            table.insert(State.title_buttons, child)
+        end
+    end
+
+    table.sort(State.title_buttons, function(a, b)
+        return a.LayoutOrder < b.LayoutOrder
+    end)
+
+    -- Populate buttons with all titles from TitleData
+    for k, titleInfo in ipairs(State.title_data) do
+        local titleButton = State.title_buttons[k + 1]
+        if titleButton then
+            local textLabel = titleButton:FindFirstChild("TextLabel")
+            if textLabel then
+                textLabel.Text = titleInfo.Tag.Text
+                textLabel.TextColor3 = titleInfo.Tag.Color
+            end
+            titleButton.Name = titleInfo.Name
+            titleButton.Visible = true
+        else
+            break
+        end
+    end
+
+    -- Hook button clicks
+    for _, conn in ipairs(State.title_connections) do pcall(function() conn:Disconnect() end) end
+    State.title_connections = {}
+
+    for _, titleButton in ipairs(State.title_buttons) do
+        if titleButton:IsA("ImageButton") then
+            local conn = titleButton.Activated:Connect(function()
+                local idx = titleButton.LayoutOrder - 1
+                if idx == 0 then
+                    State.title_chat_tag = nil
+                    Config.selected_title = nil
+                else
+                    local titleInfo = State.title_data[idx]
+                    if titleInfo then
+                        State.title_chat_tag = { Text = titleInfo.Tag.Text, Color = titleInfo.Tag.Color }
+                        Config.selected_title = titleInfo.Name
+                    end
+                end
+
+                for _, tb in ipairs(State.title_buttons) do
+                    local sel = tb:FindFirstChild("Selected")
+                    if sel then
+                        sel.Visible = tb == titleButton
+                    end
+                end
+
+                persistConfig()
+            end)
+            table.insert(State.title_connections, conn)
+        end
+    end
+
+    -- Restore previously selected title
+    if Config.selected_title then
+        for k, titleInfo in ipairs(State.title_data) do
+            if titleInfo.Name == Config.selected_title then
+                State.title_chat_tag = { Text = titleInfo.Tag.Text, Color = titleInfo.Tag.Color }
+                local btn = State.title_buttons[k + 1]
+                if btn then
+                    for _, tb in ipairs(State.title_buttons) do
+                        local sel = tb:FindFirstChild("Selected")
+                        if sel then sel.Visible = tb == btn end
+                    end
+                end
+                break
+            end
+        end
+    end
+
+    -- Hook chat to show title prefix
+    Titles.hookChat()
+
+    Config.title_enabled = true
+    persistConfig()
+    return true
+end
+
+Titles.hookChat = function()
+    if not TextChatService then return end
+    TextChatService.OnIncomingMessage = function(msg)
+        local props = Instance.new("TextChatMessageProperties")
+        if msg.TextSource and msg.TextSource.UserId == localPlayer.UserId then
+            local p = msg.PrefixText
+            -- Title prefix
+            if Config.title_enabled and State.title_chat_tag then
+                local tag = State.title_chat_tag
+                local displayName = localPlayer.DisplayName
+                p = string.format(
+                    "<font color=\"%s\">[%s]</font> <font color=\"%s\">%s</font>",
+                    colorToHex(tag.Color), tag.Text, colorToHex(tag.Color), displayName
+                )
+            end
+            -- Spoofer on top
+            if Config.spoofer_enabled then
+                if Config.spoof_displayname ~= "" then p = replaceStr(p, localPlayer.DisplayName, Config.spoof_displayname) end
+                if Config.spoof_username ~= "" then p = replaceStr(p, localPlayer.Name, Config.spoof_username) end
+            end
+            props.PrefixText = p
+        end
+        return props
+    end
+end
+
+Titles.disable = function()
+    for _, conn in ipairs(State.title_connections) do pcall(function() conn:Disconnect() end) end
+    State.title_connections = {}
+    State.title_chat_tag = nil
+    Config.title_enabled = false
+    Config.selected_title = nil
+
+    -- Restore original button state
+    if State.title_list then
+        for _, child in ipairs(State.title_list:GetChildren()) do
+            if State.title_button_state[child] then
+                local orig = State.title_button_state[child]
+                child.Name = orig.Name
+                child.Visible = orig.Visible
+                child.LayoutOrder = orig.LayoutOrder
+                local label = child:FindFirstChild("TextLabel")
+                if label then
+                    if orig.LabelText then label.Text = orig.LabelText end
+                    if orig.LabelColor then label.TextColor3 = orig.LabelColor end
+                end
+                local sel = child:FindFirstChild("Selected")
+                if sel then sel.Visible = false end
+            end
+        end
+    end
+
+    -- Re-hook chat without title (spoofer may still be active)
+    if Config.spoofer_enabled then
+        Spoofer.hookChat()
+    else
+        pcall(function() TextChatService.OnIncomingMessage = nil end)
+    end
+
+    persistConfig()
 end
 
 ------------------------------------------------------------------------
@@ -3344,6 +3552,33 @@ local function createUI()
     emoteNote.TextColor3 = C.dim; emoteNote.TextSize = 10; emoteNote.Font = Enum.Font.Gotham
     emoteNote.TextXAlignment = Enum.TextXAlignment.Left; emoteNote.TextWrapped = true; emoteNote.LayoutOrder = nextOrd()
 
+    local titleStatus = Instance.new("TextLabel", scroll)
+    titleStatus.Size = UDim2.new(1, -4, 0, 20); titleStatus.BackgroundTransparency = 1
+    titleStatus.Text = "  Titles: Off"; titleStatus.TextColor3 = C.dim
+    titleStatus.TextSize = 11; titleStatus.Font = Enum.Font.Gotham
+    titleStatus.TextXAlignment = Enum.TextXAlignment.Left; titleStatus.LayoutOrder = nextOrd()
+
+    mkToggle("Unlock All Titles", Config.title_enabled or false, function(on)
+        if on then
+            titleStatus.Text = "  Titles: Loading..."
+            task.spawn(function()
+                local ok = Titles.enable()
+                titleStatus.Text = ok and "  Titles: Active" or "  Titles: Failed"
+                titleStatus.TextColor3 = ok and C.accent2 or C.danger
+            end)
+        else
+            Titles.disable()
+            titleStatus.Text = "  Titles: Off"
+            titleStatus.TextColor3 = C.dim
+        end
+    end)
+
+    local titleNote = Instance.new("TextLabel", scroll)
+    titleNote.Size = UDim2.new(1, -4, 0, 30); titleNote.BackgroundTransparency = 1
+    titleNote.Text = "  Unlocks all titles in Settings > Titles.\n  Selected title shows in chat (client-side)."
+    titleNote.TextColor3 = C.dim; titleNote.TextSize = 10; titleNote.Font = Enum.Font.Gotham
+    titleNote.TextXAlignment = Enum.TextXAlignment.Left; titleNote.TextWrapped = true; titleNote.LayoutOrder = nextOrd()
+
     mkSpacer(6)
 
     -- Keybind
@@ -3452,6 +3687,12 @@ local function createUI()
             local ok = Emotes.enable()
             emoteStatus.Text = ok and "  Emotes: Active" or "  Emotes: Failed"
             emoteStatus.TextColor3 = ok and C.accent2 or C.danger
+        end
+        if Config.title_enabled then
+            titleStatus.Text = "  Titles: Loading..."
+            local ok = Titles.enable()
+            titleStatus.Text = ok and "  Titles: Active" or "  Titles: Failed"
+            titleStatus.TextColor3 = ok and C.accent2 or C.danger
         end
     end)
 
