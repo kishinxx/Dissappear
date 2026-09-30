@@ -1227,32 +1227,50 @@ Unlocker.hookBuyButton = function(btn)
     if State.hooked_buttons[btn] then return end
     local ok, name = pcall(function() return btn.Name end)
     if not ok then return end
-    if name:lower() ~= "buybutton" then return end
+    local lname = name:lower()
 
-    State.hooked_buttons[btn] = true
-    local conn = btn.MouseButton1Click:Connect(function()
-        if not State.unlock_active then return end
-
-        local itemName, itemType = Unlocker.getSelectedItem()
-        if not itemName then
-            itemName, itemType = Unlocker.resolveItemFromButton(btn)
-        end
-        if not itemName or not itemType then return end
-
-        if not Unlocker.isReallyOwned(itemType, itemName) then
+    if lname == "buybutton" then
+        State.hooked_buttons[btn] = true
+        local conn = btn.MouseButton1Click:Connect(function()
+            if not State.unlock_active then return end
+            local itemName, itemType = Unlocker.getSelectedItem()
+            if not itemName then
+                itemName, itemType = Unlocker.resolveItemFromButton(btn)
+            end
+            if not itemName or not itemType then return end
+            if Unlocker.isReallyOwned(itemType, itemName) then
+                if itemType == "Sword" then
+                    Unlocker.clearFakeSword()
+                elseif itemType == "Explosion" then
+                    State.equipped_skins.Explosion = nil
+                    Config.equipped_explosion = nil; persistConfig()
+                end
+                return
+            end
             if itemType == "Sword" then
                 Unlocker.equipSword(itemName)
             elseif itemType == "Explosion" then
                 Unlocker.equipExplosion(itemName)
             end
-
             pcall(function()
                 local textLabel = btn:FindFirstChildWhichIsA("TextLabel", true)
                 if textLabel then textLabel.Text = "Equipped" end
             end)
-        end
-    end)
-    table.insert(State.buy_button_conns, conn)
+        end)
+        table.insert(State.buy_button_conns, conn)
+    elseif lname == "favorite" or lname == "favouritebutton" or lname == "favoritebutton" or lname == "fav" then
+        State.hooked_buttons[btn] = true
+        local conn = btn.Activated:Connect(function()
+            if not State.unlock_active then return end
+            local itemName, itemType = Unlocker.getSelectedItem()
+            if not itemName or not itemType then return end
+            if not Unlocker.isReallyOwned(itemType, itemName) then
+                local isFav = State.sword_favorites[itemName] and true or false
+                Unlocker.setFavorite(itemType, itemName, not isFav)
+            end
+        end)
+        table.insert(State.buy_button_conns, conn)
+    end
 end
 
 Unlocker.getShopFavorites = function()
@@ -1890,6 +1908,20 @@ Unlocker.setupRespawn = function()
         task.defer(function()
             Unlocker.monitorCharacter(localPlayer.Character)
         end)
+    end
+end
+
+Unlocker.clearFakeSword = function()
+    local oldName = State.equipped_skins.Sword
+    State.equipped_skins.Sword = nil
+    Config.equipped_sword = nil; persistConfig()
+    env.equipped_sword = nil
+    env.sword_name = nil
+    if oldName and oldName ~= "" then
+        local char = localPlayer.Character
+        if char then
+            Unlocker.removeSwordModels(char, nil)
+        end
     end
 end
 
@@ -2630,11 +2662,15 @@ Emotes.installHooks = function()
         end
     end
 
-    -- Hook EmoteController.Play — use our playLocal (which calls EmotesShared:Play with server time for VFX replication)
+    -- Hook EmoteController.Play — owned emotes use real path for server VFX, unowned use playLocal
     if State.emote_controller and typeof(State.emote_controller.Play) == "function" then
         State.emote_ec_play = State.emote_controller.Play
         State.emote_controller.Play = function(self, emoteName, ...)
             if State.emote_enabled and typeof(emoteName) == "string" and emoteName ~= "" then
+                Emotes.stopLocal()
+                if Emotes.reallyOwned(emoteName) then
+                    return State.emote_ec_play(self, emoteName, ...)
+                end
                 Emotes.playLocal(emoteName)
                 return
             end
