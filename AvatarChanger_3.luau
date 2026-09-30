@@ -1515,11 +1515,14 @@ end
 Unlocker.removeSwordModels = function(char, keepName)
     if not char then return end
     for _, child in char:GetChildren() do
-        if child:IsA("Model") and child.Name ~= keepName then
+        if child:IsA("Model") and (keepName == nil or child.Name ~= keepName) then
             local isSword = false
             pcall(function()
                 isSword = ReplicatedStorage.Shared.ReplicatedInstances.Swords.GetSword:Invoke(child.Name) ~= nil
             end)
+            if not isSword and State.item_info and State.item_info.Sword then
+                isSword = State.item_info.Sword[child.Name] ~= nil
+            end
             if isSword then child:Destroy() end
         end
     end
@@ -1575,12 +1578,15 @@ Unlocker.applySwordModel = function(char, swordName, forceModel)
         -- 1. Patch ownership check
         Unlocker.patchSwords()
 
-        -- 2. Cancel current sword state machine
+        -- 2. Remove ALL existing sword models first (prevents bleed-through)
+        Unlocker.removeSwordModels(char, nil)
+
+        -- 3. Cancel current sword state machine
         if Unlocker._swordState then
             pcall(function() Unlocker._swordState.cancel(char) end)
         end
 
-        -- 3. Equip via EquipSwordTo (now ownership-patched)
+        -- 4. Equip via EquipSwordTo (now ownership-patched)
         local sm = Unlocker.findSwordsModule()
         if sm and typeof(sm.EquipSwordTo) == "function" then
             if sm:EquipSwordTo(char, swordName) == false then
@@ -1589,28 +1595,38 @@ Unlocker.applySwordModel = function(char, swordName, forceModel)
             end
         end
 
-        -- 4. Update slash name
+        -- 5. Update slash name
         State.slash_name = Unlocker.getSlashName(swordName)
 
-        -- 5. Remove sword accessories
+        -- 6. Remove sword accessories
         local swordAcc = char:FindFirstChild("SwordAccessories")
         if swordAcc then swordAcc:Destroy() end
 
-        -- 6. Get blade controller, patch it, and set sword (Flyte method)
+        -- 7. Get blade controller, patch it, and set sword (Flyte method)
         local blade = Unlocker.getBlade()
         if blade then
             Unlocker.patchBlade(blade)
             blade:SetSword(swordName)
         end
 
-        -- 7. Remove sword accessories again deferred (some respawn)
+        -- 8. Remove sword accessories + old models deferred (game may re-add them)
         task.defer(function()
             local acc = char:FindFirstChild("SwordAccessories")
             if acc then acc:Destroy() end
+            Unlocker.removeSwordModels(char, swordName)
         end)
 
-        -- 8. Remove old sword models deferred
-        task.defer(Unlocker.removeSwordModels, char, swordName)
+        -- 9. Delayed cleanup in case game re-adds the old model
+        task.delay(0.3, function()
+            if localPlayer.Character == char and State.unlock_active then
+                Unlocker.removeSwordModels(char, swordName)
+            end
+        end)
+        task.delay(1, function()
+            if localPlayer.Character == char and State.unlock_active then
+                Unlocker.removeSwordModels(char, swordName)
+            end
+        end)
     end)
     State.sword_busy = false
     return ok
@@ -2486,15 +2502,12 @@ Emotes.installHooks = function()
         end
     end
 
-    -- Hook EmoteController.Play to intercept unowned emote plays
+    -- Hook EmoteController.Play — let all emotes go through the real path
+    -- so server replicates VFX/SFX to other players (inventory hooks fool ownership checks)
     if State.emote_controller and typeof(State.emote_controller.Play) == "function" then
         State.emote_ec_play = State.emote_controller.Play
         State.emote_controller.Play = function(self, emoteName, ...)
             if State.emote_enabled and typeof(emoteName) == "string" and emoteName ~= "" then
-                if not State.emote_basic[emoteName] and not Emotes.reallyOwned(emoteName) then
-                    Emotes.playLocal(emoteName)
-                    return
-                end
                 Emotes.stopLocal()
             end
             return State.emote_ec_play(self, emoteName, ...)
@@ -2645,17 +2658,12 @@ Emotes.patchEmoteControllers = function()
     local wheelCtrl = State.emote_wheel_controller
     if not ctrl or not wheelCtrl then return end
 
-    -- Hook EmoteController.Play to intercept unowned emote plays
+    -- Let all emotes go through real path for server-side VFX/SFX
     if not State.emote_orig_play then
         State.emote_orig_play = ctrl.Play
         ctrl.Play = function(self, emoteName, ...)
-            if State.emote_enabled and typeof(emoteName) == "string" and emoteName ~= "" then
-                local folder = ReplicatedStorage:FindFirstChild("Misc")
-                folder = folder and folder:FindFirstChild("Emotes")
-                local anim = folder and folder:FindFirstChild(emoteName)
-                if anim and anim.AnimationId ~= "" and anim.AnimationId ~= "rbxassetid://0" then
-                    return Emotes.playLocal(emoteName)
-                end
+            if State.emote_enabled then
+                Emotes.stopLocal()
             end
             return State.emote_orig_play(self, emoteName, ...)
         end
