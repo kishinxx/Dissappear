@@ -158,6 +158,9 @@ local State = {
     inventory_client = nil,
     original_funcs = {},
     shop_controller = nil,
+    shop_api = nil,
+    shop_favorites = nil,
+    fav_hooked = false,
     shop_spoofed = false,
     refresh_running = false,
     refresh_dirty = false,
@@ -1252,6 +1255,105 @@ Unlocker.hookBuyButton = function(btn)
     table.insert(State.buy_button_conns, conn)
 end
 
+Unlocker.getShopFavorites = function()
+    if State.shop_favorites then return State.shop_favorites end
+    local shop = State.shop_controller
+    if not shop or not shop._inventoryPages then return nil end
+    local swordPage = shop._inventoryPages.Sword
+    if not swordPage or not getupvalues then return nil end
+    local ok, upv = pcall(getupvalues, swordPage.MarkDirty)
+    if not ok or typeof(upv) ~= "table" then return nil end
+    local fn2 = upv[2]
+    if not fn2 then return nil end
+    local ok2, upv2 = pcall(getupvalues, fn2)
+    if not ok2 or typeof(upv2) ~= "table" then return nil end
+    local fn3 = upv2[4]
+    if not fn3 then return nil end
+    local ok3, upv3 = pcall(getupvalues, fn3)
+    if not ok3 or typeof(upv3) ~= "table" then return nil end
+    for _, v in pairs(upv3) do
+        if typeof(v) == "table" and typeof(v.Sword) == "table" and typeof(v.Explosion) == "table" then
+            State.shop_favorites = v
+            return v
+        end
+    end
+    return nil
+end
+
+Unlocker.setFavorite = function(itemType, itemName, favorited)
+    if not State.unlock_active then return end
+    State.sword_favorites[itemName] = favorited and true or nil
+    Config.sword_favorites = State.sword_favorites
+    pcall(persistConfig)
+    local shopFavs = Unlocker.getShopFavorites()
+    if shopFavs and shopFavs[itemType] then
+        shopFavs[itemType][itemName] = favorited and true or nil
+        local shop = State.shop_controller
+        if shop and shop._inventoryPages and shop._inventoryPages[itemType] then
+            local page = shop._inventoryPages[itemType]
+            if typeof(page.MarkDirty) == "function" then
+                pcall(page.MarkDirty, nil, true, true)
+            end
+        end
+    end
+end
+
+Unlocker.findShopAPI = function()
+    if State.shop_api then return State.shop_api end
+    local controllers = ReplicatedStorage:FindFirstChild("Controllers")
+    if not controllers then return nil end
+    local ui = controllers:FindFirstChild("UI")
+    local mod = ui and ui:FindFirstChild("ShopControllerAPI")
+    if not mod then
+        mod = controllers:FindFirstChild("ShopControllerAPI", true)
+    end
+    if not mod then return nil end
+    local ok, result = pcall(require, mod)
+    if ok and typeof(result) == "table" then
+        State.shop_api = result
+        return result
+    end
+    return nil
+end
+
+Unlocker.hookToggleFavorite = function()
+    local shop = State.shop_controller
+    if not shop or State.fav_hooked then return end
+    State.fav_hooked = true
+
+    local shopAPI = Unlocker.findShopAPI()
+    if shopAPI and typeof(shopAPI.ToggleFavorited) == "function" and not shopAPI.__favHooked then
+        shopAPI.__favHooked = true
+        local origToggle = shopAPI.ToggleFavorited
+        shopAPI.ToggleFavorited = function(self, itemData, ...)
+            if State.unlock_active and typeof(itemData) == "table" and itemData.ItemInfo then
+                local itemType = itemData.ItemInfo.ItemType
+                local itemName = itemData.ItemInfo.Name
+                if itemType and itemName and ITEM_TYPES[itemType] and not Unlocker.isReallyOwned(itemType, itemName) then
+                    local isFav = State.sword_favorites[itemName] and true or false
+                    Unlocker.setFavorite(itemType, itemName, not isFav)
+                    if typeof(itemData.Data) == "table" and typeof(itemData.Data.IsFavorited) == "table" and typeof(itemData.Data.IsFavorited.Set) == "function" then
+                        pcall(itemData.Data.IsFavorited.Set, itemData.Data.IsFavorited, not isFav)
+                    end
+                    return true
+                end
+            end
+            return origToggle(self, itemData, ...)
+        end
+    end
+
+    local favs = Unlocker.getShopFavorites()
+    if favs and State.sword_favorites then
+        for itemType, tbl in pairs(favs) do
+            if typeof(tbl) == "table" then
+                for name, _ in pairs(State.sword_favorites) do
+                    tbl[name] = true
+                end
+            end
+        end
+    end
+end
+
 Unlocker.hookShopButtons = function()
     local pg = localPlayer:FindFirstChild("PlayerGui")
     if not pg then return end
@@ -2160,6 +2262,8 @@ Unlocker.enable = function()
                         end
                     end
                 end)
+                -- Hook favorites
+                pcall(Unlocker.hookToggleFavorite)
                 -- Force refresh
                 Unlocker.forceRefreshVirtualItems()
                 break
@@ -2308,8 +2412,14 @@ Emotes.playInternal = function(emoteName)
     Emotes.stopTrack()
     State.emote_trove = troveModule.new()
     State.emote_current = emoteName
+    local folder = ReplicatedStorage:FindFirstChild("Misc")
+    folder = folder and folder:FindFirstChild("Emotes")
+    local anim = folder and folder:FindFirstChild(emoteName)
+    if anim then
+        pcall(function() char:SetAttribute("Emoting", anim:GetAttribute("EmoteName") or anim.Name) end)
+    end
     local ok = pcall(function()
-        emotesShared:Play(char, State.emote_trove, emoteName, true, workspace:GetServerTimeNow(), nil)
+        emotesShared:Play(char, State.emote_trove, emoteName, true, workspace:GetServerTimeNow(), 1, nil, false)
     end)
     if not ok then Emotes.stopTrack(); return false end
     return true
@@ -2318,6 +2428,10 @@ end
 Emotes.stopEmote = function()
     Emotes.stopTrack()
     State.emote_current = nil
+    pcall(function()
+        local char = localPlayer.Character
+        if char then char:SetAttribute("Emoting", nil) end
+    end)
 end
 
 Emotes.stopLocal = function()
@@ -2501,7 +2615,7 @@ Emotes.installHooks = function()
         end
     end
 
-    -- Hook InventoryController.GetFavoriteState for unowned emotes + swords
+    -- Hook InventoryController.GetFavoriteState for unowned emotes
     if State.inventory_controller and typeof(State.inventory_controller.GetFavoriteState) == "function" then
         local prevGetFav = State.inventory_controller.GetFavoriteState
         State.inventory_controller.GetFavoriteState = function(self, itemType, itemName, ...)
@@ -2512,39 +2626,16 @@ Emotes.installHooks = function()
                     State.emote_fav_statables[itemName] = result
                 end
             end
-            if State.unlock_active and itemType == "Sword" and itemName then
-                if not Unlocker.isReallyOwned("Sword", itemName) and typeof(result) == "table" and typeof(result.Get) == "function" and typeof(result.Set) == "function" then
-                    local origGet = result.Get
-                    local origSet = result.Set
-                    if not result.__sword_fav_hooked then
-                        result.__sword_fav_hooked = true
-                        result.Get = function(s, ...)
-                            if State.sword_favorites[itemName] then return true end
-                            return origGet(s, ...)
-                        end
-                        result.Set = function(s, val, ...)
-                            State.sword_favorites[itemName] = val and true or nil
-                            Config.sword_favorites = State.sword_favorites
-                            pcall(persistConfig)
-                            return origSet(s, val, ...)
-                        end
-                    end
-                end
-            end
             return result
         end
     end
 
-    -- Hook EmoteController.Play — try real path for server VFX, fall back to local for unowned
+    -- Hook EmoteController.Play — use our playLocal (which calls EmotesShared:Play with server time for VFX replication)
     if State.emote_controller and typeof(State.emote_controller.Play) == "function" then
         State.emote_ec_play = State.emote_controller.Play
         State.emote_controller.Play = function(self, emoteName, ...)
             if State.emote_enabled and typeof(emoteName) == "string" and emoteName ~= "" then
-                Emotes.stopLocal()
-                pcall(State.emote_ec_play, self, emoteName, ...)
-                if not Emotes.reallyOwned(emoteName) then
-                    Emotes.playLocal(emoteName)
-                end
+                Emotes.playLocal(emoteName)
                 return
             end
             return State.emote_ec_play(self, emoteName, ...)
