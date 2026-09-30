@@ -81,6 +81,7 @@ local function saveConfig(cfg)
             emote_enabled = cfg.emote_enabled or false,
             equipped_sword = cfg.equipped_sword,
             equipped_explosion = cfg.equipped_explosion,
+            sword_favorites = cfg.sword_favorites or nil,
             toggle_key = cfg.toggle_key and cfg.toggle_key.Name or "RightShift",
         }
         writefile(CONFIG_FILE, HttpService:JSONEncode(data))
@@ -119,6 +120,15 @@ local Config = {
 
 if saved and saved.toggle_key then
     pcall(function() Config.toggle_key = Enum.KeyCode[saved.toggle_key] end)
+end
+
+if saved and typeof(saved.sword_favorites) == "table" then
+    for k, v in pairs(saved.sword_favorites) do
+        if typeof(k) == "string" and v == true then
+            Config.sword_favorites = Config.sword_favorites or {}
+            Config.sword_favorites[k] = true
+        end
+    end
 end
 
 local function persistConfig()
@@ -166,6 +176,7 @@ local State = {
     buy_button_conns = {},
     swords_module = nil,
     swords_controller = nil,
+    sword_favorites = {},
     sword_info_handler = nil,
     replicated_instances = nil,
     sword_char_conns = {},
@@ -2096,6 +2107,9 @@ Unlocker.enable = function()
     end
     State.unlock_active = true
     Config.unlock_all_enabled = true
+    if typeof(Config.sword_favorites) == "table" then
+        State.sword_favorites = Config.sword_favorites
+    end
     State.merged_cache = { Sword = nil, Explosion = nil }
     State.merged_ref = { Sword = nil, Explosion = nil }
     State.owned_cache = { Sword = nil, Explosion = nil }
@@ -2487,7 +2501,7 @@ Emotes.installHooks = function()
         end
     end
 
-    -- Hook InventoryController.GetFavoriteState for unowned emotes
+    -- Hook InventoryController.GetFavoriteState for unowned emotes + swords
     if State.inventory_controller and typeof(State.inventory_controller.GetFavoriteState) == "function" then
         local prevGetFav = State.inventory_controller.GetFavoriteState
         State.inventory_controller.GetFavoriteState = function(self, itemType, itemName, ...)
@@ -2498,17 +2512,40 @@ Emotes.installHooks = function()
                     State.emote_fav_statables[itemName] = result
                 end
             end
+            if State.unlock_active and itemType == "Sword" and itemName then
+                if not Unlocker.isReallyOwned("Sword", itemName) and typeof(result) == "table" and typeof(result.Get) == "function" and typeof(result.Set) == "function" then
+                    local origGet = result.Get
+                    local origSet = result.Set
+                    if not result.__sword_fav_hooked then
+                        result.__sword_fav_hooked = true
+                        result.Get = function(s, ...)
+                            if State.sword_favorites[itemName] then return true end
+                            return origGet(s, ...)
+                        end
+                        result.Set = function(s, val, ...)
+                            State.sword_favorites[itemName] = val and true or nil
+                            Config.sword_favorites = State.sword_favorites
+                            pcall(persistConfig)
+                            return origSet(s, val, ...)
+                        end
+                    end
+                end
+            end
             return result
         end
     end
 
-    -- Hook EmoteController.Play — let all emotes go through the real path
-    -- so server replicates VFX/SFX to other players (inventory hooks fool ownership checks)
+    -- Hook EmoteController.Play — try real path for server VFX, fall back to local for unowned
     if State.emote_controller and typeof(State.emote_controller.Play) == "function" then
         State.emote_ec_play = State.emote_controller.Play
         State.emote_controller.Play = function(self, emoteName, ...)
             if State.emote_enabled and typeof(emoteName) == "string" and emoteName ~= "" then
                 Emotes.stopLocal()
+                pcall(State.emote_ec_play, self, emoteName, ...)
+                if not Emotes.reallyOwned(emoteName) then
+                    Emotes.playLocal(emoteName)
+                end
+                return
             end
             return State.emote_ec_play(self, emoteName, ...)
         end
@@ -2658,16 +2695,7 @@ Emotes.patchEmoteControllers = function()
     local wheelCtrl = State.emote_wheel_controller
     if not ctrl or not wheelCtrl then return end
 
-    -- Let all emotes go through real path for server-side VFX/SFX
-    if not State.emote_orig_play then
-        State.emote_orig_play = ctrl.Play
-        ctrl.Play = function(self, emoteName, ...)
-            if State.emote_enabled then
-                Emotes.stopLocal()
-            end
-            return State.emote_orig_play(self, emoteName, ...)
-        end
-    end
+    -- Play hook already installed in installHooks; skip double-wrapping
 
     -- Hook UpdateHolderEmotes + UpdateMenuContentEmotes to repaint after native updates
     for _, fnName in ipairs({"UpdateHolderEmotes", "UpdateMenuContentEmotes"}) do
@@ -2690,9 +2718,9 @@ Emotes.unpatchEmoteControllers = function()
     if not State.emote_controllers_patched then return end
     local ctrl = State.emote_controller
     local wheelCtrl = State.emote_wheel_controller
-    if ctrl and State.emote_orig_play then
-        ctrl.Play = State.emote_orig_play
-        State.emote_orig_play = nil
+    if ctrl and State.emote_ec_play then
+        ctrl.Play = State.emote_ec_play
+        State.emote_ec_play = nil
     end
     for _, fnName in ipairs({"UpdateHolderEmotes", "UpdateMenuContentEmotes"}) do
         if wheelCtrl and State["emote_orig_" .. fnName] then
